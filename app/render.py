@@ -1,9 +1,12 @@
+import logging
 import subprocess
 from pathlib import Path
 from typing import Iterable, List, Optional
 from observability import pipeline_step
 from app.config_types import load_capture_settings
 from app.frame_dedup import dedupe_frames
+
+logger = logging.getLogger(__name__)
 
 BASE_APP_DIR = Path(__file__).resolve().parent
 SCREENSHOT_DIR = BASE_APP_DIR / "screenshots"
@@ -26,34 +29,82 @@ def render_video(
     H = cs.viewport_height
 
     shot_files: List[str] = []
+    missing_frames: List[str] = []
     for frame in approved_frames or []:
         path = Path(frame)
         if path.exists():
             shot_files.append(str(path))
+        else:
+            missing_frames.append(str(path))
+    if missing_frames:
+        logger.debug(
+            "render_video: skipping missing approved frames",
+            extra={
+                "operation": "render_video",
+                "missing_count": len(missing_frames),
+                "missing_frames": missing_frames[:20],
+                "output_path": str(output_path),
+            },
+        )
 
     # Drop true duplicates only; small localized UI changes are retained.
     before_dedup = len(shot_files)
     shot_files = dedupe_frames(shot_files)
-    if before_dedup != len(shot_files):
+    removed = before_dedup - len(shot_files)
+    if removed:
+        logger.debug(
+            "render_video: frame_dedup removed true-duplicate frames",
+            extra={
+                "operation": "frame_dedup",
+                "frames_before": before_dedup,
+                "frames_after": len(shot_files),
+                "frames_removed": removed,
+                "output_path": str(output_path),
+            },
+        )
         print(
-            f"[render] frame_dedup removed {before_dedup - len(shot_files)} "
+            f"[render] frame_dedup removed {removed} "
             f"true-duplicate frame(s) ({before_dedup} -> {len(shot_files)})",
             flush=True,
         )
 
     approval = render_approval or {}
     if approval and not bool(approval.get("is_sendable")):
+        reasons = approval.get("reasons") or ["unknown"]
+        logger.error(
+            "render_video: aborted — video approval not sendable",
+            extra={
+                "operation": "render_video",
+                "approval_reasons": reasons,
+                "output_path": str(output_path),
+            },
+        )
         raise RuntimeError(
             "Render aborted because video approval is not sendable: "
-            f"{approval.get('reasons') or ['unknown']}"
+            f"{reasons}"
         )
 
     if not shot_files:
+        logger.error(
+            "render_video: no approved screenshot frames provided",
+            extra={
+                "operation": "render_video",
+                "missing_frames": missing_frames[:20],
+                "output_path": str(output_path),
+            },
+        )
         raise FileNotFoundError("No approved screenshot frames provided for render")
 
     print(f"[render] screenshots={len(shot_files)} viewport={W}x{H}", flush=True)
-
-
+    logger.debug(
+        "render_video: encoding slideshow",
+        extra={
+            "operation": "render_video",
+            "frame_count": len(shot_files),
+            "viewport": f"{W}x{H}",
+            "output_path": str(output_path),
+        },
+    )
 
     scale_pad = (
         f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
@@ -107,8 +158,21 @@ def render_video(
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0 and result.stderr:
-        print(f"[render] ffmpeg stderr: {result.stderr.strip()}", flush=True)
+    if result.returncode != 0:
+        stderr_tail = (result.stderr or "").strip()
+        if stderr_tail:
+            print(f"[render] ffmpeg stderr: {stderr_tail}", flush=True)
+        logger.error(
+            "render_video: ffmpeg encode failed",
+            extra={
+                "operation": "ffmpeg_encode",
+                "returncode": result.returncode,
+                "frame_count": len(shot_files),
+                "output_path": str(output_path),
+                "stderr_tail": stderr_tail[-2000:],
+                "stdout_tail": (result.stdout or "")[-500:],
+            },
+        )
     result.check_returncode()
 
 if __name__ == "__main__":

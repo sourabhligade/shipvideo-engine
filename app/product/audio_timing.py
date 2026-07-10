@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
 
 SHIPVIDEO_AUDIT_SILENCE_NOISE_DB = -40
 SHIPVIDEO_AUDIT_SILENCE_MIN_DURATION = 0.08
@@ -19,6 +22,10 @@ def _which(name: str) -> Optional[str]:
 def media_has_audio(path: Path) -> bool:
     path = Path(path)
     if not path.exists():
+        logger.debug(
+            "media_has_audio: path does not exist",
+            extra={"operation": "media_has_audio", "media_path": str(path)},
+        )
         return False
     cmd = [
         "ffprobe", "-v", "error",
@@ -29,10 +36,29 @@ def media_has_audio(path: Path) -> bool:
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "media_has_audio: ffprobe failed",
+            extra={
+                "operation": "media_has_audio",
+                "media_path": str(path),
+                "error": f"{type(e).__name__}: {e}",
+            },
+        )
         return False
     out = (proc.stdout or "").strip().lower()
-    return "audio" in out
+    has = "audio" in out
+    if not has:
+        logger.debug(
+            "media_has_audio: no audio stream",
+            extra={
+                "operation": "media_has_audio",
+                "media_path": str(path),
+                "returncode": proc.returncode,
+                "stdout": (proc.stdout or "")[:200],
+            },
+        )
+    return has
 
 
 def audio_duration_seconds(path: Path) -> float:
@@ -44,9 +70,20 @@ def audio_duration_seconds(path: Path) -> float:
         str(path),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    raw = (proc.stdout or "0").strip() or "0"
     try:
-        return float((proc.stdout or "0").strip() or 0)
+        return float(raw)
     except ValueError:
+        logger.warning(
+            "audio_duration_seconds: could not parse duration",
+            extra={
+                "operation": "audio_duration_seconds",
+                "media_path": str(path),
+                "returncode": proc.returncode,
+                "stdout": raw[:200],
+                "stderr_tail": (proc.stderr or "")[-500:],
+            },
+        )
         return 0.0
 
 
@@ -62,7 +99,17 @@ def synthesize_tts_wav(text: str, wav_path: Path) -> Dict[str, Any]:
         engines_tried.append("piper")
         # piper needs a model; if missing, fall through
         model = Path.home() / ".local/share/piper/en_US-lessac-medium.onnx"
-        if model.exists():
+        if not model.exists():
+            logger.debug(
+                "synthesize_tts_wav: piper model missing; trying next engine",
+                extra={
+                    "operation": "synthesize_tts_wav",
+                    "wav_path": str(wav_path),
+                    "engine": "piper",
+                    "model_path": str(model),
+                },
+            )
+        elif model.exists():
             proc = subprocess.run(
                 [piper, "--model", str(model), "--output_file", str(wav_path)],
                 input=text,
@@ -72,6 +119,16 @@ def synthesize_tts_wav(text: str, wav_path: Path) -> Dict[str, Any]:
             )
             if proc.returncode == 0 and wav_path.exists() and wav_path.stat().st_size > 44:
                 return {"engine": "piper", "wav": str(wav_path), "engines_tried": engines_tried}
+            logger.debug(
+                "synthesize_tts_wav: piper failed; trying next engine",
+                extra={
+                    "operation": "synthesize_tts_wav",
+                    "wav_path": str(wav_path),
+                    "engine": "piper",
+                    "returncode": proc.returncode,
+                    "stderr_tail": (proc.stderr or "")[-500:],
+                },
+            )
 
     for eng in ("espeak-ng", "espeak"):
         bin_path = _which(eng)
@@ -86,6 +143,16 @@ def synthesize_tts_wav(text: str, wav_path: Path) -> Dict[str, Any]:
         )
         if proc.returncode == 0 and wav_path.exists() and wav_path.stat().st_size > 44:
             return {"engine": eng, "wav": str(wav_path), "engines_tried": engines_tried}
+        logger.debug(
+            "synthesize_tts_wav: engine failed; trying next",
+            extra={
+                "operation": "synthesize_tts_wav",
+                "wav_path": str(wav_path),
+                "engine": eng,
+                "returncode": proc.returncode,
+                "stderr_tail": (proc.stderr or "")[-500:],
+            },
+        )
 
     say = _which("say")
     if say:
@@ -107,7 +174,37 @@ def synthesize_tts_wav(text: str, wav_path: Path) -> Dict[str, Any]:
             aiff.unlink(missing_ok=True)
             if conv.returncode == 0 and wav_path.exists():
                 return {"engine": "say", "wav": str(wav_path), "engines_tried": engines_tried}
+            logger.debug(
+                "synthesize_tts_wav: say→wav conversion failed",
+                extra={
+                    "operation": "synthesize_tts_wav",
+                    "wav_path": str(wav_path),
+                    "engine": "say",
+                    "returncode": conv.returncode,
+                    "stderr_tail": (conv.stderr or "")[-500:],
+                },
+            )
+        else:
+            logger.debug(
+                "synthesize_tts_wav: macOS say failed",
+                extra={
+                    "operation": "synthesize_tts_wav",
+                    "wav_path": str(wav_path),
+                    "engine": "say",
+                    "returncode": proc.returncode,
+                    "stderr_tail": (proc.stderr or "")[-500:],
+                },
+            )
 
+    logger.error(
+        "synthesize_tts_wav: no TTS engine produced audio",
+        extra={
+            "operation": "synthesize_tts_wav",
+            "wav_path": str(wav_path),
+            "engines_tried": engines_tried,
+            "text_preview": text[:80],
+        },
+    )
     raise RuntimeError(
         "No TTS engine available (tried piper, espeak-ng, espeak, say). "
         f"engines_tried={engines_tried}"
@@ -137,7 +234,7 @@ def build_narration_audio(
     # Build concat list with optional silence gaps via ffmpeg filter_complex
     # Simpler: apad each clip then concat demuxer with silence wavs
     silence_wav = work_dir / "gap_silence.wav"
-    subprocess.run(
+    gap_proc = subprocess.run(
         [
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", f"anullsrc=r=22050:cl=mono",
@@ -148,6 +245,17 @@ def build_narration_audio(
         capture_output=True,
         text=True,
     )
+    if gap_proc.returncode != 0 or not silence_wav.exists():
+        logger.warning(
+            "build_narration_audio: gap silence generation failed; concatenating without gaps",
+            extra={
+                "operation": "build_gap_silence",
+                "stem": stem,
+                "work_dir": str(work_dir),
+                "returncode": gap_proc.returncode,
+                "stderr_tail": (gap_proc.stderr or "")[-500:],
+            },
+        )
 
     concat_list = work_dir / f"{stem}_concat.txt"
     lines_out: List[str] = []
@@ -177,6 +285,17 @@ def build_narration_audio(
     )
     if proc.returncode != 0:
         # re-encode fallback
+        logger.warning(
+            "build_narration_audio: concat copy failed; retrying with re-encode",
+            extra={
+                "operation": "concat_narration",
+                "stem": stem,
+                "clip_count": len(clip_paths),
+                "returncode": proc.returncode,
+                "stderr_tail": (proc.stderr or "")[-500:],
+                "retry": 1,
+            },
+        )
         proc = subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
@@ -188,6 +307,17 @@ def build_narration_audio(
             text=True,
         )
         if proc.returncode != 0:
+            logger.error(
+                "build_narration_audio: concat narration failed after re-encode",
+                extra={
+                    "operation": "concat_narration",
+                    "stem": stem,
+                    "clip_count": len(clip_paths),
+                    "returncode": proc.returncode,
+                    "stderr_tail": (proc.stderr or "")[-2000:],
+                    "retry": 1,
+                },
+            )
             raise RuntimeError(f"concat narration failed: {proc.stderr}")
 
     total = audio_duration_seconds(combined)
@@ -226,6 +356,16 @@ def build_narration_audio(
             s["end"] *= inv
             s["duration"] *= inv
         total = audio_duration_seconds(combined)
+        logger.debug(
+            "build_narration_audio: sped up audio to fit max duration",
+            extra={
+                "operation": "cap_narration_duration",
+                "stem": stem,
+                "speed_factor": speed_factor,
+                "total_duration_sec": total,
+                "max_total_seconds": max_total_seconds,
+            },
+        )
 
     return {
         "wav": str(combined),
@@ -274,6 +414,16 @@ def run_silencedetect(
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     # silencedetect logs to stderr
     log = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    if proc.returncode != 0:
+        logger.warning(
+            "run_silencedetect: ffmpeg returned non-zero; parsing stderr anyway",
+            extra={
+                "operation": "run_silencedetect",
+                "audio_path": str(audio_path),
+                "returncode": proc.returncode,
+                "stderr_tail": "\n".join(log.splitlines()[-20:]),
+            },
+        )
     silence_regions: List[Dict[str, float]] = []
     pending_start: Optional[float] = None
     for line in log.splitlines():
@@ -343,6 +493,15 @@ def align_texts_to_speech_segments(
     segs = list(speech_segments)
     if not segs:
         # equal fallback only if no speech detected
+        logger.debug(
+            "align_texts_to_speech_segments: no speech segments; equal_fallback timing",
+            extra={
+                "operation": "align_texts_to_speech_segments",
+                "text_count": n,
+                "total_duration": total_duration,
+                "source": "equal_fallback",
+            },
+        )
         if total_duration <= 0:
             total_duration = float(n)
         per = total_duration / n
@@ -491,12 +650,13 @@ def prepare_audio_and_cues(
     audio_source = "none"
     tts_meta: Dict[str, Any] = {}
 
-    if existing_media and Path(existing_media).exists() and media_has_audio(Path(existing_media)):
+    existing = Path(existing_media) if existing_media else None
+    if existing is not None and existing.exists() and media_has_audio(existing):
         extracted = work_dir / f"{stem}_extracted.wav"
         subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
-                "-i", str(existing_media),
+                "-i", str(existing),
                 "-vn", "-ac", "1", "-ar", "22050",
                 str(extracted),
             ],
@@ -506,7 +666,32 @@ def prepare_audio_and_cues(
         )
         audio_path = extracted
         audio_source = "captured"
+        logger.debug(
+            "prepare_audio_and_cues: extracted audio from existing media",
+            extra={
+                "operation": "prepare_audio_and_cues",
+                "stem": stem,
+                "existing_media": str(existing),
+                "audio_path": str(audio_path),
+                "audio_source": audio_source,
+            },
+        )
     else:
+        reason = "no_existing_media"
+        if existing is not None and not existing.exists():
+            reason = "existing_media_missing"
+        elif existing is not None:
+            reason = "existing_media_has_no_audio"
+        logger.debug(
+            "prepare_audio_and_cues: falling back to TTS narration",
+            extra={
+                "operation": "prepare_audio_and_cues",
+                "stem": stem,
+                "existing_media": str(existing) if existing else None,
+                "fallback_reason": reason,
+                "text_count": len(texts),
+            },
+        )
         tts_meta = build_narration_audio(
             texts, work_dir, stem=stem, max_total_seconds=max_total_seconds
         )

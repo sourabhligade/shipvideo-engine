@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -8,6 +9,8 @@ from app.product.video import (
     SHIPVIDEO_AUDIT_MAX_VIDEO_SECONDS,
     render_journey_video,
 )
+
+logger = logging.getLogger(__name__)
 
 
 ProgressCb = Optional[Callable[[str, Dict[str, Any]], None]]
@@ -76,6 +79,10 @@ def run_link_to_video(
             on_progress(stage, extra)
 
     emit("capture_start", url=url, headless=True, job_id=job_id)
+    logger.debug(
+        "run_link_to_video: capture starting",
+        extra={"operation": "capture_journey", "job_id": job_id, "url": url, "max_steps": max_steps},
+    )
     plan = capture_journey_sync(url, job_dir, max_steps=max_steps, headless=True)
     emit(
         "capture_done",
@@ -84,8 +91,28 @@ def run_link_to_video(
         end_reason=plan.end_reason,
         headless=True,
     )
+    logger.debug(
+        "run_link_to_video: capture finished",
+        extra={
+            "operation": "capture_journey",
+            "job_id": job_id,
+            "url": url,
+            "step_count": len(plan.steps),
+            "end_reached": plan.end_reached,
+            "end_reason": plan.end_reason,
+        },
+    )
 
     if not plan.steps:
+        logger.warning(
+            "run_link_to_video: no steps captured; aborting without video",
+            extra={
+                "operation": "run_link_to_video",
+                "job_id": job_id,
+                "url": url,
+                "end_reason": plan.end_reason or "no_steps_captured",
+            },
+        )
         return {
             "ok": False,
             "error": plan.end_reason or "no_steps_captured",
@@ -121,15 +148,43 @@ def run_link_to_video(
             azure_meta["dom_chars"] = len(dom_text)
             _apply_subtitle_lines(plan.steps, list(azure_meta.get("lines") or []))
             emit("azure_subtitles_done", lines=azure_meta.get("lines"))
+            logger.debug(
+                "run_link_to_video: azure subtitles applied",
+                extra={
+                    "operation": "azure_subtitles",
+                    "job_id": job_id,
+                    "url": plan.start_url or url,
+                    "line_count": len(azure_meta.get("lines") or []),
+                    "dom_chars": azure_meta.get("dom_chars"),
+                },
+            )
         except Exception as e:
             azure_meta = {
                 "used": False,
                 "error": f"{type(e).__name__}: {e}",
             }
             emit("azure_subtitles_failed", error=azure_meta["error"])
+            logger.warning(
+                "run_link_to_video: azure subtitles failed; continuing with default subtitles",
+                extra={
+                    "operation": "azure_subtitles",
+                    "job_id": job_id,
+                    "url": plan.start_url or url,
+                    "error": azure_meta["error"],
+                },
+            )
 
     out_path = video_path_for_job(job_dir, job_id)
     emit("render_start", frames=len(plan.steps), max_video_seconds=SHIPVIDEO_AUDIT_MAX_VIDEO_SECONDS)
+    logger.debug(
+        "run_link_to_video: render starting",
+        extra={
+            "operation": "render_journey_video",
+            "job_id": job_id,
+            "frame_count": len(plan.steps),
+            "output_path": str(out_path),
+        },
+    )
     render_meta = render_journey_video(
         plan.steps,
         out_path,
@@ -142,6 +197,17 @@ def run_link_to_video(
         video=str(out_path),
         total_duration_sec=render_meta.get("total_duration_sec"),
         headless=True,
+    )
+    logger.debug(
+        "run_link_to_video: render finished",
+        extra={
+            "operation": "render_journey_video",
+            "job_id": job_id,
+            "output_path": str(out_path),
+            "total_duration_sec": render_meta.get("total_duration_sec"),
+            "frames": render_meta.get("frames"),
+            "audio_source": render_meta.get("audio_source"),
+        },
     )
 
     step_payload = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import traceback
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from playwright.sync_api import sync_playwright
 
+logger = logging.getLogger(__name__)
 
 
 _CURSOR_RIPPLE_JS = r"""
@@ -68,16 +70,34 @@ def run_script(
     video_dir = output_dir / "video_tmp"
     video_dir.mkdir(parents=True, exist_ok=True)
 
-
     ns: Dict[str, Any] = {}
     try:
-        exec(compile(script, "<generated_demo>", "exec"), ns)              
+        exec(compile(script, "<generated_demo>", "exec"), ns)
     except SyntaxError as e:
-        _log("script_runner.syntax_error", {"error": str(e)})
+        _log("script_runner.syntax_error", {"error": str(e), "base_url": base_url})
+        logger.error(
+            "run_script: generated demo script has syntax error",
+            extra={
+                "operation": "compile_script",
+                "base_url": base_url,
+                "output_dir": str(output_dir),
+                "error": str(e),
+                "lineno": getattr(e, "lineno", None),
+            },
+        )
         return {"success": False, "webm_path": None, "error": f"syntax_error: {e}"}
 
     run_demo = ns.get("run_demo")
     if not callable(run_demo):
+        logger.error(
+            "run_script: script did not define run_demo(page, context)",
+            extra={
+                "operation": "compile_script",
+                "base_url": base_url,
+                "output_dir": str(output_dir),
+                "ns_keys": sorted(str(k) for k in ns.keys() if not str(k).startswith("__"))[:30],
+            },
+        )
         return {
             "success": False,
             "webm_path": None,
@@ -116,7 +136,14 @@ def run_script(
             try:
                 page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
                 _log("script_runner.started", {"base_url": base_url})
-
+                logger.debug(
+                    "run_script: navigation complete, starting run_demo",
+                    extra={
+                        "operation": "page_goto",
+                        "base_url": base_url,
+                        "output_dir": str(output_dir),
+                    },
+                )
 
                 run_demo(page, context)
 
@@ -124,19 +151,45 @@ def run_script(
                 _log("script_runner.completed", {"success": True})
             except Exception as e:
                 error_str = f"{type(e).__name__}: {e}"
-                _log("script_runner.execution_error", {"error": error_str})
+                _log("script_runner.execution_error", {"error": error_str, "base_url": base_url})
+                logger.error(
+                    "run_script: demo execution failed",
+                    extra={
+                        "operation": "run_demo",
+                        "base_url": base_url,
+                        "output_dir": str(output_dir),
+                        "error": error_str,
+                    },
+                )
             finally:
 
                 try:
                     video_path = page.video.path()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(
+                        "run_script: page.video.path() unavailable",
+                        extra={
+                            "operation": "video_path_resolve",
+                            "base_url": base_url,
+                            "output_dir": str(output_dir),
+                            "error": f"{type(e).__name__}: {e}",
+                        },
+                    )
                 context.close()
                 browser.close()
 
     except Exception as e:
         error_str = f"playwright_setup_error: {type(e).__name__}: {e}"
-        _log("script_runner.setup_error", {"error": error_str})
+        _log("script_runner.setup_error", {"error": error_str, "base_url": base_url})
+        logger.error(
+            "run_script: playwright setup failed",
+            extra={
+                "operation": "playwright_setup",
+                "base_url": base_url,
+                "output_dir": str(output_dir),
+                "error": error_str,
+            },
+        )
         traceback.print_exc()
         return {"success": False, "webm_path": None, "error": error_str}
 
@@ -148,15 +201,35 @@ def run_script(
 
         return {"success": False, "webm_path": video_path, "error": error_str}
 
-
     webm_files = sorted(video_dir.glob("*.webm"), key=lambda p: p.stat().st_size, reverse=True)
     if webm_files:
         video_path = str(webm_files[0])
         _log("script_runner.video_found_in_dir", {"path": video_path})
+        logger.warning(
+            "run_script: primary video path missing; using largest webm in video_dir",
+            extra={
+                "operation": "video_path_fallback",
+                "base_url": base_url,
+                "output_dir": str(output_dir),
+                "fallback_path": video_path,
+                "webm_count": len(webm_files),
+                "bytes": webm_files[0].stat().st_size,
+                "success": success,
+            },
+        )
         if success:
             return {"success": True, "webm_path": video_path, "error": None}
         return {"success": False, "webm_path": video_path, "error": error_str}
 
+    logger.error(
+        "run_script: no video produced",
+        extra={
+            "operation": "run_script",
+            "base_url": base_url,
+            "output_dir": str(output_dir),
+            "error": error_str or "no_video_produced",
+        },
+    )
     return {
         "success": False,
         "webm_path": None,

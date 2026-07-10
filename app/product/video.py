@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 import textwrap
 from pathlib import Path
@@ -7,6 +8,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from app.product.journey import JourneyStep, build_subtitles
 from app.product.audio_timing import prepare_audio_and_cues
+
+logger = logging.getLogger(__name__)
 
 
 SHIPVIDEO_AUDIT_FRAME_SECONDS = 2.8
@@ -39,13 +42,35 @@ def _burn_caption_on_image(image_path: Path, caption: str, out_path: Path) -> Pa
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     w, h = img.size
+    font_path_used = "default"
     try:
         font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 28)
-    except Exception:
+        font_path_used = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    except Exception as e:
+        logger.debug(
+            "_burn_caption_on_image: Arial font unavailable, trying DejaVu",
+            extra={
+                "operation": "load_caption_font",
+                "frame_path": str(image_path),
+                "font_path": "/System/Library/Fonts/Supplemental/Arial.ttf",
+                "error": f"{type(e).__name__}: {e}",
+            },
+        )
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
-        except Exception:
+            font_path_used = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        except Exception as e2:
+            logger.debug(
+                "_burn_caption_on_image: truetype fonts unavailable, using PIL default",
+                extra={
+                    "operation": "load_caption_font",
+                    "frame_path": str(image_path),
+                    "font_path": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    "error": f"{type(e2).__name__}: {e2}",
+                },
+            )
             font = ImageFont.load_default()
+            font_path_used = "PIL.ImageFont.load_default"
 
     lines = textwrap.wrap((caption or "").strip(), width=56) or [""]
     line_heights = []
@@ -77,6 +102,15 @@ def _burn_caption_on_image(image_path: Path, caption: str, out_path: Path) -> Pa
     composed = Image.alpha_composite(img, overlay).convert("RGB")
     out_path = Path(out_path)
     composed.save(out_path, format="PNG")
+    logger.debug(
+        "_burn_caption_on_image: caption burned",
+        extra={
+            "operation": "burn_caption",
+            "frame_path": str(image_path),
+            "out_path": str(out_path),
+            "font": font_path_used,
+        },
+    )
     return out_path
 
 
@@ -155,12 +189,35 @@ def render_journey_video(
     work_dir = Path(work_dir or output_mp4.parent)
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    source_frames = [
-        Path(s.screenshot_path)
-        for s in steps
-        if s.screenshot_path and Path(s.screenshot_path).exists()
-    ]
+    missing_shots: List[str] = []
+    source_frames = []
+    for s in steps:
+        if s.screenshot_path and Path(s.screenshot_path).exists():
+            source_frames.append(Path(s.screenshot_path))
+        elif s.screenshot_path:
+            missing_shots.append(str(s.screenshot_path))
+        else:
+            missing_shots.append(f"step_index={getattr(s, 'index', '?')}:no_path")
+    if missing_shots:
+        logger.debug(
+            "render_journey_video: skipping steps without screenshot files",
+            extra={
+                "operation": "render_journey_video",
+                "job_id": job_id,
+                "missing_count": len(missing_shots),
+                "missing_frames": missing_shots[:20],
+            },
+        )
     if not source_frames:
+        logger.error(
+            "render_journey_video: no screenshot frames to render",
+            extra={
+                "operation": "render_journey_video",
+                "job_id": job_id,
+                "step_count": len(steps),
+                "missing_frames": missing_shots[:20],
+            },
+        )
         raise FileNotFoundError("No screenshot frames to render")
 
     stem = f"journey_{job_id}" if job_id else output_mp4.stem
@@ -181,6 +238,15 @@ def render_journey_video(
     cues = list(audio_pack.get("cues") or [])
     if not cues:
         # ultimate fallback: equal chunks within 60s
+        logger.warning(
+            "render_journey_video: empty cues; using equal-chunk timing fallback",
+            extra={
+                "operation": "cue_timing_fallback",
+                "job_id": job_id,
+                "frame_count": len(source_frames),
+                "audio_source": audio_pack.get("audio_source"),
+            },
+        )
         seconds_per_frame = allocate_frame_durations(
             len(source_frames),
             default_seconds=seconds_per_frame,
@@ -211,6 +277,16 @@ def render_journey_video(
             cue["start"] = float(cue["start"]) * scale
             cue["end"] = float(cue["end"]) * scale
         total_duration = sum(frame_durations)
+        logger.debug(
+            "render_journey_video: scaled durations to max total",
+            extra={
+                "operation": "duration_cap",
+                "job_id": job_id,
+                "scale": scale,
+                "total_duration_sec": total_duration,
+                "max_total_seconds": max_total_seconds,
+            },
+        )
 
     seconds_per_frame = (
         total_duration / len(frame_durations) if frame_durations else seconds_per_frame
@@ -243,6 +319,7 @@ def render_journey_video(
     captioned_dir.mkdir(parents=True, exist_ok=True)
     frames: List[Path] = []
     subtitles_burned = False
+    burn_failures = 0
     if burn_subtitles:
         for i, step in enumerate(steps_with_shots):
             caption = step.subtitle or (cues[i]["text"] if i < len(cues) else "")
@@ -251,8 +328,29 @@ def render_journey_video(
                 _burn_caption_on_image(Path(step.screenshot_path), caption, out_img)
                 frames.append(out_img)
                 subtitles_burned = True
-            except Exception:
+            except Exception as e:
+                burn_failures += 1
+                logger.warning(
+                    "render_journey_video: caption burn failed; using original frame",
+                    extra={
+                        "operation": "burn_caption",
+                        "job_id": job_id,
+                        "frame_index": i,
+                        "frame_path": str(step.screenshot_path),
+                        "error": f"{type(e).__name__}: {e}",
+                    },
+                )
                 frames.append(Path(step.screenshot_path))
+        if burn_failures:
+            logger.warning(
+                "render_journey_video: caption burn degraded",
+                extra={
+                    "operation": "burn_caption",
+                    "job_id": job_id,
+                    "burn_failures": burn_failures,
+                    "frame_count": len(frames),
+                },
+            )
     else:
         frames = list(source_frames)
 
@@ -300,6 +398,17 @@ def render_journey_video(
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
+        logger.error(
+            "render_journey_video: ffmpeg slideshow failed",
+            extra={
+                "operation": "ffmpeg_slideshow",
+                "job_id": job_id,
+                "frame_count": len(frames),
+                "silent_mp4": str(silent_mp4),
+                "returncode": result.returncode,
+                "stderr_tail": (result.stderr or "")[-2000:],
+            },
+        )
         raise RuntimeError(f"ffmpeg slideshow failed: {result.stderr or result.stdout}")
 
     # Mux narration audio when present
@@ -320,8 +429,29 @@ def render_journey_video(
             text=True,
         )
         if mux.returncode != 0:
+            logger.warning(
+                "render_journey_video: audio mux failed; shipping silent video",
+                extra={
+                    "operation": "ffmpeg_mux_audio",
+                    "job_id": job_id,
+                    "audio_path": str(audio_path),
+                    "silent_mp4": str(silent_mp4),
+                    "output_path": str(output_mp4),
+                    "returncode": mux.returncode,
+                    "stderr_tail": (mux.stderr or "")[-2000:],
+                },
+            )
             output_mp4.write_bytes(silent_mp4.read_bytes())
     else:
+        logger.debug(
+            "render_journey_video: no audio to mux; writing silent video",
+            extra={
+                "operation": "ffmpeg_mux_audio",
+                "job_id": job_id,
+                "audio_path": audio_path,
+                "output_path": str(output_mp4),
+            },
+        )
         output_mp4.write_bytes(silent_mp4.read_bytes())
 
     return {
