@@ -315,6 +315,7 @@ def build_narration_audio(
     concat_list.write_text("\n".join(lines_out) + "\n", encoding="utf-8")
     combined = work_dir / f"{stem}.wav"
     concat_t0 = time.monotonic()
+    retries_attempted = 0
     proc = subprocess.run(
         [
             "ffmpeg", "-y", "-loglevel", "error",
@@ -328,6 +329,7 @@ def build_narration_audio(
     )
     if proc.returncode != 0:
         # re-encode fallback
+        retries_attempted = 1
         logger.warning(
             "build_narration_audio: concat copy failed; retrying with re-encode",
             extra={
@@ -336,7 +338,7 @@ def build_narration_audio(
                 "clip_count": len(clip_paths),
                 "returncode": proc.returncode,
                 "stderr_tail": (proc.stderr or "")[-500:],
-                "retry": 1,
+                "retries_attempted": retries_attempted,
             },
         )
         proc = subprocess.run(
@@ -358,12 +360,13 @@ def build_narration_audio(
                     "clip_count": len(clip_paths),
                     "returncode": proc.returncode,
                     "stderr_tail": (proc.stderr or "")[-2000:],
-                    "retry": 1,
+                    "retries_attempted": retries_attempted,
                 },
             )
             raise RuntimeError(f"concat narration failed: {proc.stderr}")
 
     concat_duration_sec = time.monotonic() - concat_t0
+    concat_bytes = combined.stat().st_size if combined.exists() else 0
     _c_log = logger.warning if concat_duration_sec > 30.0 else logger.debug
     _c_log(
         "build_narration_audio: ffmpeg concat completed",
@@ -372,6 +375,8 @@ def build_narration_audio(
             "stem": stem,
             "clip_count": len(clip_paths),
             "duration_sec": round(concat_duration_sec, 3),
+            "retries_attempted": retries_attempted,
+            "bytes": concat_bytes,
             "slow": concat_duration_sec > 30.0,
         },
     )
@@ -425,6 +430,7 @@ def build_narration_audio(
 
     narr_duration_sec = time.monotonic() - narr_t0
     _n_log = logger.warning if narr_duration_sec > 90.0 else logger.debug
+    narr_bytes = combined.stat().st_size if combined.exists() else 0
     _n_log(
         "build_narration_audio: completed",
         extra={
@@ -434,6 +440,8 @@ def build_narration_audio(
             "duration_sec": round(narr_duration_sec, 3),
             "audio_duration_sec": total,
             "speed_factor": speed_factor,
+            "tts_engines": engines,
+            "bytes": narr_bytes,
             "slow": narr_duration_sec > 90.0,
         },
     )
@@ -814,6 +822,26 @@ def prepare_audio_and_cues(
         cues = align_texts_to_speech_segments(
             texts, speech, total_duration=float(detect["audio_duration_sec"])
         )
+
+    audio_bytes = audio_path.stat().st_size if audio_path.exists() else 0
+    engines = list(tts_meta.get("tts_engines") or []) if tts_meta else []
+    logger.debug(
+        "prepare_audio_and_cues: completed with counts",
+        extra={
+            "operation": "prepare_audio_and_cues",
+            "stem": stem,
+            "audio_source": audio_source,
+            "text_count": len(texts),
+            "cue_count": len(cues),
+            "speech_segment_count": len(speech or []),
+            "silence_region_count": len((detect or {}).get("silence_regions") or []),
+            "tts_clip_count": len(engines),
+            "tts_engines": engines,
+            "bytes": audio_bytes,
+            "audio_duration_sec": detect["audio_duration_sec"],
+            "audio_path": str(audio_path),
+        },
+    )
 
     return {
         "audio_path": str(audio_path),

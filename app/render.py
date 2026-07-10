@@ -52,17 +52,19 @@ def render_video(
     before_dedup = len(shot_files)
     shot_files = dedupe_frames(shot_files)
     removed = before_dedup - len(shot_files)
+    logger.debug(
+        "render_video: frame_dedup completed",
+        extra={
+            "operation": "frame_dedup",
+            "frames_before": before_dedup,
+            "frames_after": len(shot_files),
+            "frames_removed": removed,
+            "frames_kept": len(shot_files),
+            "missing_count": len(missing_frames),
+            "output_path": str(output_path),
+        },
+    )
     if removed:
-        logger.debug(
-            "render_video: frame_dedup removed true-duplicate frames",
-            extra={
-                "operation": "frame_dedup",
-                "frames_before": before_dedup,
-                "frames_after": len(shot_files),
-                "frames_removed": removed,
-                "output_path": str(output_path),
-            },
-        )
         print(
             f"[render] frame_dedup removed {removed} "
             f"true-duplicate frame(s) ({before_dedup} -> {len(shot_files)})",
@@ -178,14 +180,17 @@ def render_video(
             },
         )
     else:
+        out_bytes = output_path.stat().st_size if output_path.exists() else 0
         log_fn = logger.warning if encode_duration_sec > 60.0 else logger.debug
         log_fn(
             "render_video: ffmpeg encode completed",
             extra={
                 "operation": "ffmpeg_encode",
                 "frame_count": len(shot_files),
+                "frames_kept": len(shot_files),
                 "output_path": str(output_path),
                 "duration_sec": round(encode_duration_sec, 3),
+                "bytes": out_bytes,
                 "slow": encode_duration_sec > 60.0,
             },
         )

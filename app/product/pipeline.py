@@ -212,6 +212,17 @@ def run_link_to_video(
                     "url": plan.start_url or url,
                     "line_count": len(azure_meta.get("lines") or []),
                     "dom_chars": azure_meta.get("dom_chars"),
+                    "prompt_tokens": azure_meta.get("prompt_tokens"),
+                    "completion_tokens": azure_meta.get("completion_tokens"),
+                    "tokens_used": (
+                        (azure_meta.get("prompt_tokens") or 0)
+                        + (azure_meta.get("completion_tokens") or 0)
+                    )
+                    if (
+                        azure_meta.get("prompt_tokens") is not None
+                        or azure_meta.get("completion_tokens") is not None
+                    )
+                    else None,
                 },
             )
         except Exception as e:
@@ -277,6 +288,25 @@ def run_link_to_video(
             "total_duration_sec": render_meta.get("total_duration_sec"),
             "frames": render_meta.get("frames"),
             "audio_source": render_meta.get("audio_source"),
+        },
+    )
+
+    out_bytes = out_path.stat().st_size if out_path.exists() else 0
+    logger.debug(
+        "run_link_to_video: completed with counts",
+        extra={
+            "operation": "run_link_to_video",
+            "job_id": job_id,
+            "url": url,
+            "step_count": len(plan.steps),
+            "frames": render_meta.get("frames"),
+            "cue_count": len(render_meta.get("cues") or []),
+            "bytes": out_bytes,
+            "total_duration_sec": render_meta.get("total_duration_sec"),
+            "audio_source": render_meta.get("audio_source"),
+            "azure_used": bool(azure_meta.get("used")),
+            "prompt_tokens": azure_meta.get("prompt_tokens"),
+            "completion_tokens": azure_meta.get("completion_tokens"),
         },
     )
 

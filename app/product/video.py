@@ -515,6 +515,7 @@ def render_journey_video(
         output_mp4.write_bytes(silent_mp4.read_bytes())
 
     render_duration_sec = time.monotonic() - render_t0
+    out_bytes = output_mp4.stat().st_size if output_mp4.exists() else 0
     _rlog = logger.warning if render_duration_sec > 120.0 else logger.debug
     _rlog(
         "render_journey_video: completed",
@@ -524,6 +525,15 @@ def render_journey_video(
             "output_path": str(output_mp4),
             "duration_sec": round(render_duration_sec, 3),
             "frame_count": len(frames),
+            "frames_kept": len(frames),
+            "source_frame_count": len(source_frames),
+            "steps_with_shots": len(steps_with_shots),
+            "missing_shot_count": len(missing_shots),
+            "cue_count": len(cues),
+            "burn_failures": burn_failures if burn_subtitles else 0,
+            "subtitles_burned": subtitles_burned,
+            "bytes": out_bytes,
+            "total_duration_sec": total_duration,
             "slow": render_duration_sec > 120.0,
         },
     )
