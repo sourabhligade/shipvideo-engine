@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 from observability import pipeline_step
 from app.config_types import load_capture_settings
+from app.frame_dedup import dedupe_frames
 
 BASE_APP_DIR = Path(__file__).resolve().parent
 SCREENSHOT_DIR = BASE_APP_DIR / "screenshots"
@@ -29,6 +30,16 @@ def render_video(
         path = Path(frame)
         if path.exists():
             shot_files.append(str(path))
+
+    # Drop true duplicates only; small localized UI changes are retained.
+    before_dedup = len(shot_files)
+    shot_files = dedupe_frames(shot_files)
+    if before_dedup != len(shot_files):
+        print(
+            f"[render] frame_dedup removed {before_dedup - len(shot_files)} "
+            f"true-duplicate frame(s) ({before_dedup} -> {len(shot_files)})",
+            flush=True,
+        )
 
     approval = render_approval or {}
     if approval and not bool(approval.get("is_sendable")):
