@@ -45,6 +45,7 @@ def media_has_audio(path: Path) -> bool:
                 "media_path": str(path),
                 "error": f"{type(e).__name__}: {e}",
             },
+            exc_info=True,
         )
         return False
     out = (proc.stdout or "").strip().lower()
@@ -84,6 +85,7 @@ def audio_duration_seconds(path: Path) -> float:
                 "stdout": raw[:200],
                 "stderr_tail": (proc.stderr or "")[-500:],
             },
+            exc_info=True,
         )
         return 0.0
 

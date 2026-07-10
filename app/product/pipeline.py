@@ -239,6 +239,7 @@ def run_link_to_video(
                     "url": plan.start_url or url,
                     "error": azure_meta["error"],
                 },
+                exc_info=True,
             )
 
     out_path = video_path_for_job(job_dir, job_id)

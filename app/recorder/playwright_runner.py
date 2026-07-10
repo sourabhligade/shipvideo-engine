@@ -85,6 +85,7 @@ def run_script(
                 "error": str(e),
                 "lineno": getattr(e, "lineno", None),
             },
+            exc_info=True,
         )
         return {"success": False, "webm_path": None, "error": f"syntax_error: {e}"}
 
@@ -170,7 +171,10 @@ def run_script(
                 _log("script_runner.completed", {"success": True, "demo_duration_sec": round(demo_duration_sec, 3)})
             except Exception as e:
                 error_str = f"{type(e).__name__}: {e}"
-                _log("script_runner.execution_error", {"error": error_str, "base_url": base_url})
+                _log(
+                    "script_runner.execution_error",
+                    {"error": error_str, "base_url": base_url, "traceback": traceback.format_exc()},
+                )
                 logger.error(
                     "run_script: demo execution failed",
                     extra={
@@ -179,6 +183,7 @@ def run_script(
                         "output_dir": str(output_dir),
                         "error": error_str,
                     },
+                    exc_info=True,
                 )
             finally:
 
@@ -193,13 +198,17 @@ def run_script(
                             "output_dir": str(output_dir),
                             "error": f"{type(e).__name__}: {e}",
                         },
+                        exc_info=True,
                     )
                 context.close()
                 browser.close()
 
     except Exception as e:
         error_str = f"playwright_setup_error: {type(e).__name__}: {e}"
-        _log("script_runner.setup_error", {"error": error_str, "base_url": base_url})
+        _log(
+            "script_runner.setup_error",
+            {"error": error_str, "base_url": base_url, "traceback": traceback.format_exc()},
+        )
         logger.error(
             "run_script: playwright setup failed",
             extra={
@@ -208,8 +217,8 @@ def run_script(
                 "output_dir": str(output_dir),
                 "error": error_str,
             },
+            exc_info=True,
         )
-        traceback.print_exc()
         return {"success": False, "webm_path": None, "error": error_str}
 
 

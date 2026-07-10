@@ -56,6 +56,7 @@ def _burn_caption_on_image(image_path: Path, caption: str, out_path: Path) -> Pa
                 "font_path": "/System/Library/Fonts/Supplemental/Arial.ttf",
                 "error": f"{type(e).__name__}: {e}",
             },
+            exc_info=True,
         )
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
@@ -69,6 +70,7 @@ def _burn_caption_on_image(image_path: Path, caption: str, out_path: Path) -> Pa
                     "font_path": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                     "error": f"{type(e2).__name__}: {e2}",
                 },
+                exc_info=True,
             )
             font = ImageFont.load_default()
             font_path_used = "PIL.ImageFont.load_default"
@@ -355,6 +357,7 @@ def render_journey_video(
                         "frame_path": str(step.screenshot_path),
                         "error": f"{type(e).__name__}: {e}",
                     },
+                    exc_info=True,
                 )
                 frames.append(Path(step.screenshot_path))
         if burn_failures:
