@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import shutil
 import subprocess
 from pathlib import Path
@@ -89,6 +90,7 @@ def audio_duration_seconds(path: Path) -> float:
 
 def synthesize_tts_wav(text: str, wav_path: Path) -> Dict[str, Any]:
     """TTS fallback: piper, espeak-ng, espeak, or macOS say → wav."""
+    tts_t0 = time.monotonic()
     wav_path = Path(wav_path)
     wav_path.parent.mkdir(parents=True, exist_ok=True)
     text = (text or "").strip() or "Step."
@@ -118,6 +120,19 @@ def synthesize_tts_wav(text: str, wav_path: Path) -> Dict[str, Any]:
                 timeout=120,
             )
             if proc.returncode == 0 and wav_path.exists() and wav_path.stat().st_size > 44:
+                tts_duration_sec = time.monotonic() - tts_t0
+                _tts_log = logger.warning if tts_duration_sec > 30.0 else logger.debug
+                _tts_log(
+                    "synthesize_tts_wav: completed",
+                    extra={
+                        "operation": "synthesize_tts_wav",
+                        "wav_path": str(wav_path),
+                        "engine": "piper",
+                        "duration_sec": round(tts_duration_sec, 3),
+                        "engines_tried": engines_tried,
+                        "slow": tts_duration_sec > 30.0,
+                    },
+                )
                 return {"engine": "piper", "wav": str(wav_path), "engines_tried": engines_tried}
             logger.debug(
                 "synthesize_tts_wav: piper failed; trying next engine",
@@ -142,6 +157,19 @@ def synthesize_tts_wav(text: str, wav_path: Path) -> Dict[str, Any]:
             timeout=120,
         )
         if proc.returncode == 0 and wav_path.exists() and wav_path.stat().st_size > 44:
+            tts_duration_sec = time.monotonic() - tts_t0
+            _tts_log = logger.warning if tts_duration_sec > 30.0 else logger.debug
+            _tts_log(
+                "synthesize_tts_wav: completed",
+                extra={
+                    "operation": "synthesize_tts_wav",
+                    "wav_path": str(wav_path),
+                    "engine": eng,
+                    "duration_sec": round(tts_duration_sec, 3),
+                    "engines_tried": engines_tried,
+                    "slow": tts_duration_sec > 30.0,
+                },
+            )
             return {"engine": eng, "wav": str(wav_path), "engines_tried": engines_tried}
         logger.debug(
             "synthesize_tts_wav: engine failed; trying next",
@@ -173,6 +201,19 @@ def synthesize_tts_wav(text: str, wav_path: Path) -> Dict[str, Any]:
             )
             aiff.unlink(missing_ok=True)
             if conv.returncode == 0 and wav_path.exists():
+                tts_duration_sec = time.monotonic() - tts_t0
+                _tts_log = logger.warning if tts_duration_sec > 30.0 else logger.debug
+                _tts_log(
+                    "synthesize_tts_wav: completed",
+                    extra={
+                        "operation": "synthesize_tts_wav",
+                        "wav_path": str(wav_path),
+                        "engine": "say",
+                        "duration_sec": round(tts_duration_sec, 3),
+                        "engines_tried": engines_tried,
+                        "slow": tts_duration_sec > 30.0,
+                    },
+                )
                 return {"engine": "say", "wav": str(wav_path), "engines_tried": engines_tried}
             logger.debug(
                 "synthesize_tts_wav: say→wav conversion failed",
@@ -220,6 +261,7 @@ def build_narration_audio(
     gap_seconds: float = SHIPVIDEO_AUDIT_GAP_BETWEEN_CLIPS,
 ) -> Dict[str, Any]:
     """Synthesize one WAV per line, concat with short gaps, return combined wav + per-line spans."""
+    narr_t0 = time.monotonic()
     work_dir = Path(work_dir)
     clips_dir = work_dir / "tts_clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -272,6 +314,7 @@ def build_narration_audio(
 
     concat_list.write_text("\n".join(lines_out) + "\n", encoding="utf-8")
     combined = work_dir / f"{stem}.wav"
+    concat_t0 = time.monotonic()
     proc = subprocess.run(
         [
             "ffmpeg", "-y", "-loglevel", "error",
@@ -320,6 +363,19 @@ def build_narration_audio(
             )
             raise RuntimeError(f"concat narration failed: {proc.stderr}")
 
+    concat_duration_sec = time.monotonic() - concat_t0
+    _c_log = logger.warning if concat_duration_sec > 30.0 else logger.debug
+    _c_log(
+        "build_narration_audio: ffmpeg concat completed",
+        extra={
+            "operation": "concat_narration",
+            "stem": stem,
+            "clip_count": len(clip_paths),
+            "duration_sec": round(concat_duration_sec, 3),
+            "slow": concat_duration_sec > 30.0,
+        },
+    )
+
     total = audio_duration_seconds(combined)
     # Cap by speed-up if over max
     speed_factor = 1.0
@@ -367,6 +423,21 @@ def build_narration_audio(
             },
         )
 
+    narr_duration_sec = time.monotonic() - narr_t0
+    _n_log = logger.warning if narr_duration_sec > 90.0 else logger.debug
+    _n_log(
+        "build_narration_audio: completed",
+        extra={
+            "operation": "build_narration_audio",
+            "stem": stem,
+            "clip_count": len(clip_paths),
+            "duration_sec": round(narr_duration_sec, 3),
+            "audio_duration_sec": total,
+            "speed_factor": speed_factor,
+            "slow": narr_duration_sec > 90.0,
+        },
+    )
+
     return {
         "wav": str(combined),
         "spans": spans,
@@ -411,7 +482,9 @@ def run_silencedetect(
 ) -> Dict[str, Any]:
     audio_path = Path(audio_path)
     cmd = silencedetect_command(audio_path, noise_db=noise_db, min_silence=min_silence)
+    sd_t0 = time.monotonic()
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    sd_duration_sec = time.monotonic() - sd_t0
     # silencedetect logs to stderr
     log = (proc.stderr or "") + "\n" + (proc.stdout or "")
     if proc.returncode != 0:
@@ -441,6 +514,19 @@ def run_silencedetect(
 
     total = audio_duration_seconds(audio_path)
     speech_segments = silence_regions_to_speech(silence_regions, total)
+    _sd_log = logger.warning if sd_duration_sec > 30.0 else logger.debug
+    _sd_log(
+        "run_silencedetect: completed",
+        extra={
+            "operation": "run_silencedetect",
+            "audio_path": str(audio_path),
+            "duration_sec": round(sd_duration_sec, 3),
+            "silence_region_count": len(silence_regions),
+            "speech_segment_count": len(speech_segments),
+            "returncode": proc.returncode,
+            "slow": sd_duration_sec > 30.0,
+        },
+    )
     return {
         "command": cmd,
         "command_str": " ".join(cmd),
@@ -653,6 +739,7 @@ def prepare_audio_and_cues(
     existing = Path(existing_media) if existing_media else None
     if existing is not None and existing.exists() and media_has_audio(existing):
         extracted = work_dir / f"{stem}_extracted.wav"
+        extract_t0 = time.monotonic()
         subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
@@ -663,6 +750,19 @@ def prepare_audio_and_cues(
             check=True,
             capture_output=True,
             text=True,
+        )
+        extract_duration_sec = time.monotonic() - extract_t0
+        _ex_log = logger.warning if extract_duration_sec > 30.0 else logger.debug
+        _ex_log(
+            "prepare_audio_and_cues: audio extraction completed",
+            extra={
+                "operation": "extract_audio",
+                "stem": stem,
+                "existing_media": str(existing),
+                "audio_path": str(extracted),
+                "duration_sec": round(extract_duration_sec, 3),
+                "slow": extract_duration_sec > 30.0,
+            },
         )
         audio_path = extracted
         audio_source = "captured"

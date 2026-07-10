@@ -66,6 +66,7 @@ def run_script(
     output_dir: Path,
     timeout_seconds: int = 120,
 ) -> Dict[str, Any]:
+    run_t0 = time.monotonic()
     output_dir.mkdir(parents=True, exist_ok=True)
     video_dir = output_dir / "video_tmp"
     video_dir.mkdir(parents=True, exist_ok=True)
@@ -134,21 +135,39 @@ def run_script(
             ns["context"] = context
 
             try:
+                nav_t0 = time.monotonic()
                 page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
-                _log("script_runner.started", {"base_url": base_url})
-                logger.debug(
-                    "run_script: navigation complete, starting run_demo",
+                nav_duration_sec = time.monotonic() - nav_t0
+                _nav_log = logger.warning if nav_duration_sec > 10.0 else logger.debug
+                _nav_log(
+                    "run_script: page.goto completed",
                     extra={
-                        "operation": "page_goto",
+                        "operation": "playwright_navigation",
                         "base_url": base_url,
                         "output_dir": str(output_dir),
+                        "duration_sec": round(nav_duration_sec, 3),
+                        "slow": nav_duration_sec > 10.0,
+                    },
+                )
+                _log("script_runner.started", {"base_url": base_url, "nav_duration_sec": round(nav_duration_sec, 3)})
+
+                demo_t0 = time.monotonic()
+                run_demo(page, context)
+                demo_duration_sec = time.monotonic() - demo_t0
+                _demo_log = logger.warning if demo_duration_sec > 90.0 else logger.debug
+                _demo_log(
+                    "run_script: run_demo completed",
+                    extra={
+                        "operation": "run_demo",
+                        "base_url": base_url,
+                        "output_dir": str(output_dir),
+                        "duration_sec": round(demo_duration_sec, 3),
+                        "slow": demo_duration_sec > 90.0,
                     },
                 )
 
-                run_demo(page, context)
-
                 success = True
-                _log("script_runner.completed", {"success": True})
+                _log("script_runner.completed", {"success": True, "demo_duration_sec": round(demo_duration_sec, 3)})
             except Exception as e:
                 error_str = f"{type(e).__name__}: {e}"
                 _log("script_runner.execution_error", {"error": error_str, "base_url": base_url})
@@ -194,8 +213,24 @@ def run_script(
         return {"success": False, "webm_path": None, "error": error_str}
 
 
+    run_duration_sec = time.monotonic() - run_t0
+
     if video_path and Path(video_path).exists():
         _log("script_runner.video_ready", {"path": video_path, "success": success})
+        _done_log = logger.warning if run_duration_sec > 120.0 else logger.debug
+        _done_log(
+            "run_script: finished with video path",
+            extra={
+                "operation": "run_script",
+                "base_url": base_url,
+                "output_dir": str(output_dir),
+                "webm_path": video_path,
+                "success": success,
+                "duration_sec": round(run_duration_sec, 3),
+                "bytes": Path(video_path).stat().st_size,
+                "slow": run_duration_sec > 120.0,
+            },
+        )
         if success:
             return {"success": True, "webm_path": video_path, "error": None}
 
@@ -215,6 +250,7 @@ def run_script(
                 "webm_count": len(webm_files),
                 "bytes": webm_files[0].stat().st_size,
                 "success": success,
+                "duration_sec": round(run_duration_sec, 3),
             },
         )
         if success:
@@ -228,6 +264,7 @@ def run_script(
             "base_url": base_url,
             "output_dir": str(output_dir),
             "error": error_str or "no_video_produced",
+            "duration_sec": round(run_duration_sec, 3),
         },
     )
     return {

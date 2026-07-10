@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -34,7 +35,19 @@ def _extract_dom_text_headless(url: str) -> str:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page(viewport={"width": 1280, "height": 720})
             try:
+                nav_t0 = time.monotonic()
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                nav_duration_sec = time.monotonic() - nav_t0
+                _nav_log = logger.warning if nav_duration_sec > 10.0 else logger.debug
+                _nav_log(
+                    "_extract_dom_text_headless: page.goto completed",
+                    extra={
+                        "operation": "playwright_navigation",
+                        "url": url,
+                        "duration_sec": round(nav_duration_sec, 3),
+                        "slow": nav_duration_sec > 10.0,
+                    },
+                )
                 await page.wait_for_timeout(800)
                 text = await page.evaluate(
                     """() => {
@@ -49,7 +62,21 @@ def _extract_dom_text_headless(url: str) -> str:
                 await browser.close()
         return str(text or "")
 
-    return asyncio.run(_run())
+    extract_t0 = time.monotonic()
+    result = asyncio.run(_run())
+    extract_duration_sec = time.monotonic() - extract_t0
+    _ex_log = logger.warning if extract_duration_sec > 30.0 else logger.debug
+    _ex_log(
+        "_extract_dom_text_headless: completed",
+        extra={
+            "operation": "extract_dom_text",
+            "url": url,
+            "duration_sec": round(extract_duration_sec, 3),
+            "dom_chars": len(result or ""),
+            "slow": extract_duration_sec > 30.0,
+        },
+    )
+    return result
 
 
 def _apply_subtitle_lines(steps: List[Any], lines: List[str]) -> None:
@@ -83,7 +110,21 @@ def run_link_to_video(
         "run_link_to_video: capture starting",
         extra={"operation": "capture_journey", "job_id": job_id, "url": url, "max_steps": max_steps},
     )
+    capture_t0 = time.monotonic()
     plan = capture_journey_sync(url, job_dir, max_steps=max_steps, headless=True)
+    capture_duration_sec = time.monotonic() - capture_t0
+    _cap_log = logger.warning if capture_duration_sec > 120.0 else logger.debug
+    _cap_log(
+        "run_link_to_video: capture_journey completed",
+        extra={
+            "operation": "capture_journey",
+            "job_id": job_id,
+            "url": url,
+            "duration_sec": round(capture_duration_sec, 3),
+            "step_count": len(plan.steps),
+            "slow": capture_duration_sec > 120.0,
+        },
+    )
     emit(
         "capture_done",
         steps=len(plan.steps),
@@ -138,11 +179,26 @@ def run_link_to_video(
                 }
                 for s in plan.steps
             ]
+            llm_t0 = time.monotonic()
             azure_meta = generate_subtitles_from_dom(
                 url=plan.start_url or url,
                 dom_text=dom_text,
                 step_summaries=step_summaries,
                 n_lines=len(plan.steps),
+            )
+            llm_duration_sec = time.monotonic() - llm_t0
+            _llm_log = logger.warning if llm_duration_sec > 45.0 else logger.debug
+            _llm_log(
+                "run_link_to_video: azure subtitle LLM call completed",
+                extra={
+                    "operation": "azure_subtitle_llm",
+                    "job_id": job_id,
+                    "url": plan.start_url or url,
+                    "duration_sec": round(llm_duration_sec, 3),
+                    "dom_chars": len(dom_text),
+                    "n_lines": len(plan.steps),
+                    "slow": llm_duration_sec > 45.0,
+                },
             )
             azure_meta["used"] = True
             azure_meta["dom_chars"] = len(dom_text)
@@ -185,12 +241,26 @@ def run_link_to_video(
             "output_path": str(out_path),
         },
     )
+    render_t0 = time.monotonic()
     render_meta = render_journey_video(
         plan.steps,
         out_path,
         work_dir=job_dir,
         job_id=job_id,
         max_total_seconds=SHIPVIDEO_AUDIT_MAX_VIDEO_SECONDS,
+    )
+    render_duration_sec = time.monotonic() - render_t0
+    _ren_log = logger.warning if render_duration_sec > 120.0 else logger.debug
+    _ren_log(
+        "run_link_to_video: render_journey_video completed",
+        extra={
+            "operation": "render_journey_video",
+            "job_id": job_id,
+            "output_path": str(out_path),
+            "duration_sec": round(render_duration_sec, 3),
+            "frames": render_meta.get("frames"),
+            "slow": render_duration_sec > 120.0,
+        },
     )
     emit(
         "render_done",

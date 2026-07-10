@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -185,6 +186,7 @@ def render_journey_video(
     burn_subtitles: bool = True,
     job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    render_t0 = time.monotonic()
     output_mp4 = Path(output_mp4)
     work_dir = Path(work_dir or output_mp4.parent)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -228,12 +230,25 @@ def render_journey_video(
     ]
 
     # Waveform-based timing: silencedetect on captured audio, else TTS + silencedetect.
+    audio_t0 = time.monotonic()
     audio_pack = prepare_audio_and_cues(
         narrations,
         work_dir,
         stem=stem,
         existing_media=None,
         max_total_seconds=max_total_seconds,
+    )
+    audio_duration_sec = time.monotonic() - audio_t0
+    _audio_log = logger.warning if audio_duration_sec > 45.0 else logger.debug
+    _audio_log(
+        "render_journey_video: prepare_audio_and_cues completed",
+        extra={
+            "operation": "prepare_audio_and_cues",
+            "job_id": job_id,
+            "duration_sec": round(audio_duration_sec, 3),
+            "audio_source": audio_pack.get("audio_source"),
+            "slow": audio_duration_sec > 45.0,
+        },
     )
     cues = list(audio_pack.get("cues") or [])
     if not cues:
@@ -320,6 +335,7 @@ def render_journey_video(
     frames: List[Path] = []
     subtitles_burned = False
     burn_failures = 0
+    burn_t0 = time.monotonic()
     if burn_subtitles:
         for i, step in enumerate(steps_with_shots):
             caption = step.subtitle or (cues[i]["text"] if i < len(cues) else "")
@@ -353,6 +369,20 @@ def render_journey_video(
             )
     else:
         frames = list(source_frames)
+    burn_duration_sec = time.monotonic() - burn_t0
+    if burn_subtitles:
+        _burn_log = logger.warning if burn_duration_sec > 15.0 else logger.debug
+        _burn_log(
+            "render_journey_video: caption burn pass completed",
+            extra={
+                "operation": "burn_caption_batch",
+                "job_id": job_id,
+                "duration_sec": round(burn_duration_sec, 3),
+                "frame_count": len(frames),
+                "burn_failures": burn_failures,
+                "slow": burn_duration_sec > 15.0,
+            },
+        )
 
     if not frames:
         frames = list(source_frames)
@@ -396,7 +426,9 @@ def render_journey_video(
             str(silent_mp4),
         ]
 
+    slideshow_t0 = time.monotonic()
     result = subprocess.run(cmd, capture_output=True, text=True)
+    slideshow_duration_sec = time.monotonic() - slideshow_t0
     if result.returncode != 0:
         logger.error(
             "render_journey_video: ffmpeg slideshow failed",
@@ -406,14 +438,28 @@ def render_journey_video(
                 "frame_count": len(frames),
                 "silent_mp4": str(silent_mp4),
                 "returncode": result.returncode,
+                "duration_sec": round(slideshow_duration_sec, 3),
                 "stderr_tail": (result.stderr or "")[-2000:],
             },
         )
         raise RuntimeError(f"ffmpeg slideshow failed: {result.stderr or result.stdout}")
+    _ss_log = logger.warning if slideshow_duration_sec > 60.0 else logger.debug
+    _ss_log(
+        "render_journey_video: ffmpeg slideshow completed",
+        extra={
+            "operation": "ffmpeg_slideshow",
+            "job_id": job_id,
+            "frame_count": len(frames),
+            "silent_mp4": str(silent_mp4),
+            "duration_sec": round(slideshow_duration_sec, 3),
+            "slow": slideshow_duration_sec > 60.0,
+        },
+    )
 
     # Mux narration audio when present
     audio_path = audio_pack.get("audio_path")
     if audio_path and Path(audio_path).exists():
+        mux_t0 = time.monotonic()
         mux = subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
@@ -428,6 +474,20 @@ def render_journey_video(
             capture_output=True,
             text=True,
         )
+        mux_duration_sec = time.monotonic() - mux_t0
+        if mux.returncode == 0:
+            _mux_log = logger.warning if mux_duration_sec > 30.0 else logger.debug
+            _mux_log(
+                "render_journey_video: audio mux completed",
+                extra={
+                    "operation": "ffmpeg_mux_audio",
+                    "job_id": job_id,
+                    "audio_path": str(audio_path),
+                    "output_path": str(output_mp4),
+                    "duration_sec": round(mux_duration_sec, 3),
+                    "slow": mux_duration_sec > 30.0,
+                },
+            )
         if mux.returncode != 0:
             logger.warning(
                 "render_journey_video: audio mux failed; shipping silent video",
@@ -453,6 +513,20 @@ def render_journey_video(
             },
         )
         output_mp4.write_bytes(silent_mp4.read_bytes())
+
+    render_duration_sec = time.monotonic() - render_t0
+    _rlog = logger.warning if render_duration_sec > 120.0 else logger.debug
+    _rlog(
+        "render_journey_video: completed",
+        extra={
+            "operation": "render_journey_video",
+            "job_id": job_id,
+            "output_path": str(output_mp4),
+            "duration_sec": round(render_duration_sec, 3),
+            "frame_count": len(frames),
+            "slow": render_duration_sec > 120.0,
+        },
+    )
 
     return {
         "video": str(output_mp4),

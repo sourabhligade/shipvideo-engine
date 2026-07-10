@@ -1,5 +1,6 @@
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import Iterable, List, Optional
 from observability import pipeline_step
@@ -153,11 +154,13 @@ def render_video(
             str(output_path),
         ]
 
+    encode_t0 = time.monotonic()
     result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
     )
+    encode_duration_sec = time.monotonic() - encode_t0
     if result.returncode != 0:
         stderr_tail = (result.stderr or "").strip()
         if stderr_tail:
@@ -169,8 +172,21 @@ def render_video(
                 "returncode": result.returncode,
                 "frame_count": len(shot_files),
                 "output_path": str(output_path),
+                "duration_sec": round(encode_duration_sec, 3),
                 "stderr_tail": stderr_tail[-2000:],
                 "stdout_tail": (result.stdout or "")[-500:],
+            },
+        )
+    else:
+        log_fn = logger.warning if encode_duration_sec > 60.0 else logger.debug
+        log_fn(
+            "render_video: ffmpeg encode completed",
+            extra={
+                "operation": "ffmpeg_encode",
+                "frame_count": len(shot_files),
+                "output_path": str(output_path),
+                "duration_sec": round(encode_duration_sec, 3),
+                "slow": encode_duration_sec > 60.0,
             },
         )
     result.check_returncode()
