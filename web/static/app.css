@@ -260,3 +260,20 @@ footer code {
   padding: 2px 6px;
   border-radius: 6px;
 }
+
+.chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid var(--stroke);
+  color: var(--muted);
+  vertical-align: middle;
+}
+.chip.focus { color: #9ec1ff; border-color: rgba(91,140,255,0.45); }
+.chip.result { color: #c4b5ff; border-color: rgba(124,92,255,0.4); }
+.chip.ok { color: var(--ok); border-color: rgba(61,214,140,0.45); }
+.chip.bad { color: var(--bad); border-color: rgba(255,107,122,0.45); }

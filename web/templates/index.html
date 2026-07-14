@@ -12,8 +12,8 @@
       <div class="badge"><span class="dot"></span> Open source · Playwright · FFmpeg · FastAPI</div>
       <h1>Paste a link.<br /><span>Get the whole journey video.</span></h1>
       <p class="sub">
-        ShipVideo opens your URL, walks clickable paths toward the end of the flow,
-        captures each screen, and stitches a subtitled demo so you can see exactly
+        ShipVideo opens your URL, highlights each click target, proves the UI changed,
+        zooms into interactions, and stitches a subtitled demo — so you can see exactly
         how you reached the finish.
       </p>
     </header>
@@ -32,6 +32,23 @@
             <option value="12">12</option>
             <option value="15">15</option>
           </select>
+        </label>
+        <label>Language
+          <select id="language">
+            <option value="en" selected>English</option>
+            <option value="es">Español</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="pt">Português</option>
+            <option value="ja">日本語</option>
+            <option value="hi">हिन्दी</option>
+          </select>
+        </label>
+        <label>Brand color
+          <input id="brand-primary" type="color" value="#5b8cff" title="Primary brand color" />
+        </label>
+        <label>Brand name
+          <input id="brand-name" type="text" placeholder="ShipVideo" maxlength="32" style="width:7rem;padding:8px 10px;border-radius:10px;border:1px solid var(--stroke);background:rgba(0,0,0,.28);color:var(--text)" />
         </label>
         <span class="status-pill queued" id="status">idle</span>
         <span id="stage-label" style="color:var(--muted);font-size:0.85rem"></span>

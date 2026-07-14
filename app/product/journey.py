@@ -9,6 +9,8 @@ from urllib.parse import urljoin, urlparse
 SHIPVIDEO_AUDIT_MAX_JOURNEY_STEPS = 12
 SHIPVIDEO_AUDIT_MAX_CANDIDATES = 40
 SHIPVIDEO_AUDIT_DWELL_MS = 900
+# Short dwell after injecting a highlight before focus screenshot
+SHIPVIDEO_FOCUS_DWELL_MS = 250
 
 
 @dataclass
@@ -21,6 +23,14 @@ class JourneyStep:
     subtitle: str = ""
     screenshot_path: str = ""
     duration_sec: float = 2.8
+    # Click-target geometry in viewport pixels (x, y, w, h)
+    click_bbox: Optional[Dict[str, float]] = None
+    # proven | url_changed | same_page | unproven | failed
+    proof_status: str = ""
+    # focus = pre-click highlight frame; result = post-nav; capture = generic
+    frame_role: str = "result"
+    # Optional path of a zoomed companion frame
+    zoom_path: str = ""
 
 
 @dataclass
@@ -29,19 +39,23 @@ class JourneyPlan:
     steps: List[JourneyStep] = field(default_factory=list)
     end_reached: bool = False
     end_reason: str = ""
+    proven_clicks: int = 0
+    failed_clicks: int = 0
 
 
 _CTA_RE = re.compile(
     r"\b(get\s*started|sign\s*up|try\s*(it|free|now)?|start\s*(free|now|trial)?|"
     r"learn\s*more|see\s*(more|demo|how)|explore|continue|next|submit|"
     r"buy\s*now|shop|pricing|features|docs|documentation|product|"
-    r"watch\s*demo|request\s*demo|book\s*a?\s*demo|contact|download)\b",
+    r"watch\s*demo|request\s*demo|book\s*a?\s*demo|contact|download|"
+    r"create|add|new|open|view|settings|dashboard|home)\b",
     re.I,
 )
 
 _SKIP_RE = re.compile(
     r"\b(login|log\s*in|sign\s*in|cart|cookie|privacy|terms|careers|"
-    r"twitter|linkedin|facebook|instagram|youtube|github\.com/login)\b",
+    r"twitter|linkedin|facebook|instagram|youtube|github\.com/login|"
+    r"accept\s*all|reject\s*all|manage\s*cookies)\b",
     re.I,
 )
 
@@ -67,8 +81,17 @@ def _normalize_url(base: str, href: str) -> str:
     return full.split("#")[0]
 
 
-def score_candidate(text: str, href: str, role: str = "") -> int:
-    blob = f"{text} {href} {role}".strip()
+def score_candidate(
+    text: str,
+    href: str,
+    role: str = "",
+    *,
+    testid: str = "",
+    aria: str = "",
+    bbox: Optional[Dict[str, float]] = None,
+    viewport: tuple[int, int] = (1280, 720),
+) -> int:
+    blob = f"{text} {href} {role} {testid} {aria}".strip()
     if not blob:
         return 0
     if _SKIP_RE.search(blob):
@@ -76,8 +99,14 @@ def score_candidate(text: str, href: str, role: str = "") -> int:
     score = 0
     if _CTA_RE.search(blob):
         score += 40
+    if testid:
+        score += 25
+    if aria:
+        score += 8
     if role in ("button", "link"):
         score += 5
+    if role == "button":
+        score += 3
     words = len(text.split())
     if 1 <= words <= 5:
         score += 10
@@ -85,6 +114,22 @@ def score_candidate(text: str, href: str, role: str = "") -> int:
         score += 4
     if href and not href.startswith("http"):
         score += 3
+    # Prefer mid-viewport targets (hero/CTA) over footer/cookie chrome
+    if isinstance(bbox, dict):
+        try:
+            cx = float(bbox.get("x", 0)) + float(bbox.get("w", 0)) / 2.0
+            cy = float(bbox.get("y", 0)) + float(bbox.get("h", 0)) / 2.0
+            vw, vh = float(viewport[0]), float(viewport[1])
+            if vw > 0 and vh > 0:
+                dx = abs(cx - vw / 2.0) / vw
+                dy = abs(cy - vh * 0.4) / vh  # slightly above center (hero)
+                dist = (dx * dx + dy * dy) ** 0.5
+                score += int(max(0, 18 * (1.0 - min(1.0, dist * 1.6))))
+                # Deprioritize very bottom chrome
+                if cy > vh * 0.88:
+                    score -= 20
+        except (TypeError, ValueError):
+            pass
     return score
 
 
@@ -100,18 +145,40 @@ def pick_next_targets(
         text = str(c.get("text") or "").strip()
         href = str(c.get("href") or "").strip()
         role = str(c.get("role") or "").strip()
+        testid = str(c.get("testid") or "").strip()
+        aria = str(c.get("aria") or "").strip()
         full = _normalize_url(current_url, href) if href else ""
         if full and (full in visited or not _same_site(current_url, full)):
             continue
-        sc = score_candidate(text, href or full, role)
-        if sc <= 0 and not text:
+        bbox = c.get("bbox") if isinstance(c.get("bbox"), dict) else None
+        sc = score_candidate(
+            text, href or full, role, testid=testid, aria=aria, bbox=bbox
+        )
+        if sc <= 0 and not text and not testid:
             continue
-        ranked.append((sc, {**c, "resolved_url": full, "text": text}))
+        ranked.append(
+            (
+                sc,
+                {
+                    **c,
+                    "resolved_url": full,
+                    "text": text or aria or testid,
+                    "testid": testid,
+                    "aria": aria,
+                },
+            )
+        )
     ranked.sort(key=lambda x: x[0], reverse=True)
     out: List[Dict[str, Any]] = []
     seen_keys: set[str] = set()
     for sc, item in ranked:
-        key = (item.get("resolved_url") or "") + "|" + (item.get("text") or "").casefold()
+        key = (
+            (item.get("resolved_url") or "")
+            + "|"
+            + (item.get("text") or "").casefold()
+            + "|"
+            + (item.get("testid") or "")
+        )
         if key in seen_keys:
             continue
         seen_keys.add(key)
@@ -124,6 +191,9 @@ def pick_next_targets(
 def narrate_step(step: JourneyStep, *, is_first: bool, is_last: bool) -> str:
     title = (step.title or "this page").strip()
     label = (step.label or "").strip()
+    role = (step.frame_role or "result").strip()
+    if role == "focus" and label:
+        return f"We focus on “{label}” — the next control to click."
     if is_first:
         return f"We open the starting link and land on {title}."
     if step.action == "click" and label:
@@ -158,3 +228,14 @@ def build_subtitles(steps: List[JourneyStep], seconds_per_frame: float = 2.8) ->
         )
         t += dur
     return cues
+
+
+def page_fingerprint(url: str, title: str, body_sample: str = "") -> str:
+    """Compact fingerprint for post-click change detection."""
+    path = ""
+    try:
+        path = urlparse(url).path or "/"
+    except Exception:
+        path = url or ""
+    sample = re.sub(r"\s+", " ", (body_sample or "")[:400]).strip().casefold()
+    return f"{path}|{(title or '').strip().casefold()}|{sample}"

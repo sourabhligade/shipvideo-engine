@@ -54,7 +54,15 @@ def list_jobs(limit: int = 20) -> list[Dict[str, Any]]:
     return items
 
 
-def create_job(url: str, *, max_steps: int = 10, use_azure_subtitles: bool = True) -> Dict[str, Any]:
+def create_job(
+    url: str,
+    *,
+    max_steps: int = 10,
+    use_azure_subtitles: bool = True,
+    language: str = "en",
+    brand: Optional[Dict[str, Any]] = None,
+    export_sizzle: bool = True,
+) -> Dict[str, Any]:
     job_id = uuid.uuid4().hex[:12]
     job = {
         "id": job_id,
@@ -63,6 +71,9 @@ def create_job(url: str, *, max_steps: int = 10, use_azure_subtitles: bool = Tru
         "stage": "queued",
         "max_steps": max_steps,
         "use_azure_subtitles": use_azure_subtitles,
+        "language": language or "en",
+        "brand": brand or {},
+        "export_sizzle": bool(export_sizzle),
         "created_at": time.time(),
         "updated_at": time.time(),
         "error": None,
@@ -119,6 +130,9 @@ def _run_job(job_id: str) -> None:
             max_steps=int(job.get("max_steps") or 10),
             use_azure_subtitles=bool(job.get("use_azure_subtitles", True)),
             on_progress=on_progress,
+            language=str(job.get("language") or "en"),
+            brand=job.get("brand") or {},
+            export_sizzle=bool(job.get("export_sizzle", True)),
         )
         if not result.get("ok"):
             _update(
@@ -131,6 +145,14 @@ def _run_job(job_id: str) -> None:
             return
         result["video_url"] = f"/api/jobs/{job_id}/video"
         result["srt_url"] = f"/api/jobs/{job_id}/srt"
+        result["gif_url"] = f"/api/jobs/{job_id}/gif"
+        result["thumbnail_url"] = f"/api/jobs/{job_id}/thumbnail"
+        result["sizzle_url"] = f"/api/jobs/{job_id}/sizzle"
+        result["chapters_url"] = f"/api/jobs/{job_id}/chapters"
+        result["youtube_url"] = f"/api/jobs/{job_id}/youtube"
+        lang = str(result.get("language") or job.get("language") or "en")
+        if lang and lang != "en":
+            result["srt_lang_url"] = f"/api/jobs/{job_id}/srt/{lang}"
         result["video_path"] = str(video_path_for_job(_job_dir(job_id), job_id))
         _update(job_id, status="done", stage="done", result=result, error=None, headless=True)
     except Exception as e:

@@ -9,6 +9,24 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from app.product.journey import JourneyStep, build_subtitles
 from app.product.audio_timing import prepare_audio_and_cues
+from app.render_effects.annotate import draw_click_highlight, zoom_crop_toward_bbox
+from app.render_effects.progress import draw_click_ripple, draw_progress_bar
+from app.render_effects.brand import stamp_brand
+from app.render_effects.chapters import (
+    chapter_entries_from_steps,
+    write_webvtt_chapters,
+    write_youtube_chapters_text,
+)
+from app.render_effects.youtube_desc import write_youtube_description
+from app.render_effects.thumbnail import make_thumbnail
+from app.render_effects.title_card import make_title_card
+from app.render_effects.sizzle import export_sizzle_mp4
+from app.render_effects.i18n_captions import (
+    normalize_lang,
+    translate_lines,
+    write_translated_srt,
+)
+from app.product.brand_theme import BrandTheme, DEFAULT_BRAND
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +194,115 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return path
 
 
+
+def prepare_demo_frames(
+    steps: List[JourneyStep],
+    work_dir: Path,
+    *,
+    apply_zoom: bool = True,
+    zoom_factor: float = 1.28,
+    theme: Optional[BrandTheme] = None,
+) -> List[Path]:
+    """Produce accuracy-oriented frames: click rings, labels, mild zoom on focus."""
+    theme = theme or DEFAULT_BRAND
+    out_dir = Path(work_dir) / "demo_frames"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prepared: List[Path] = []
+    total = len([s for s in steps if s.screenshot_path and Path(s.screenshot_path).exists()])
+    idx = 0
+    for step in steps:
+        if not step.screenshot_path or not Path(step.screenshot_path).exists():
+            continue
+        idx += 1
+        src = Path(step.screenshot_path)
+        role = (step.frame_role or "result").strip()
+        label = (step.label or "").strip()
+        badge = (step.proof_status or "").strip()
+        bbox = step.click_bbox if isinstance(step.click_bbox, dict) else None
+
+        # Focus frames already often have DOM highlight + annotate; still ensure badge/label
+        ann_path = out_dir / f"frame_{idx:03d}_{role}.png"
+        try:
+            draw_click_highlight(
+                src,
+                ann_path,
+                bbox=bbox if role == "focus" else None,
+                label=label if role == "focus" else (label if step.action == "click" else ""),
+                step_index=idx,
+                total_steps=total,
+                proof_badge=badge if role == "result" and badge else "",
+            )
+            frame_path = ann_path
+        except Exception as e:
+            logger.debug(
+                "prepare_demo_frames: annotate failed; using source",
+                extra={
+                    "operation": "prepare_demo_frames",
+                    "frame_index": idx,
+                    "error": f"{type(e).__name__}: {e}",
+                },
+                exc_info=True,
+            )
+            frame_path = src
+
+        if apply_zoom and role == "focus" and bbox:
+            zoom_path = out_dir / f"frame_{idx:03d}_zoom.png"
+            try:
+                zoom_crop_toward_bbox(frame_path, zoom_path, bbox, zoom=zoom_factor)
+                step.zoom_path = str(zoom_path)
+                frame_path = zoom_path
+            except Exception as e:
+                logger.debug(
+                    "prepare_demo_frames: zoom failed",
+                    extra={
+                        "operation": "zoom_crop",
+                        "frame_index": idx,
+                        "error": f"{type(e).__name__}: {e}",
+                    },
+                    exc_info=True,
+                )
+
+        # Screencast-style click ripple on focus frames
+        if role == "focus" and bbox:
+            ripple_path = out_dir / f"frame_{idx:03d}_ripple.png"
+            try:
+                draw_click_ripple(frame_path, ripple_path, bbox)
+                frame_path = ripple_path
+            except Exception as e:
+                logger.debug(
+                    "prepare_demo_frames: ripple failed",
+                    extra={"operation": "click_ripple", "frame_index": idx, "error": f"{type(e).__name__}: {e}"},
+                    exc_info=True,
+                )
+
+        # Journey progress bar (competitor standard: always show where you are)
+        prog_path = out_dir / f"frame_{idx:03d}_prog.png"
+        try:
+            draw_progress_bar(frame_path, prog_path, step_index=idx, total_steps=total, theme=theme)
+            frame_path = prog_path
+        except Exception as e:
+            logger.debug(
+                "prepare_demo_frames: progress bar failed",
+                extra={"operation": "progress_bar", "frame_index": idx, "error": f"{type(e).__name__}: {e}"},
+                exc_info=True,
+            )
+
+        # Subtle brand stamp
+        brand_path = out_dir / f"frame_{idx:03d}_brand.png"
+        try:
+            stamp_brand(frame_path, brand_path, text=theme.name, theme=theme)
+            frame_path = brand_path
+        except Exception as e:
+            logger.debug(
+                "prepare_demo_frames: brand stamp failed",
+                extra={"operation": "brand_stamp", "frame_index": idx, "error": f"{type(e).__name__}: {e}"},
+                exc_info=True,
+            )
+
+        prepared.append(frame_path)
+    return prepared
+
+
 def render_journey_video(
     steps: List[JourneyStep],
     output_mp4: Path,
@@ -187,11 +314,17 @@ def render_journey_video(
     height: int = SHIPVIDEO_AUDIT_VIEWPORT[1],
     burn_subtitles: bool = True,
     job_id: Optional[str] = None,
+    brand: Optional[BrandTheme] = None,
+    language: str = "en",
+    export_sizzle: bool = True,
+    ken_burns: bool = True,
 ) -> Dict[str, Any]:
     render_t0 = time.monotonic()
     output_mp4 = Path(output_mp4)
     work_dir = Path(work_dir or output_mp4.parent)
     work_dir.mkdir(parents=True, exist_ok=True)
+    brand = brand or DEFAULT_BRAND
+    language = normalize_lang(language)
 
     missing_shots: List[str] = []
     source_frames = []
@@ -226,10 +359,95 @@ def render_journey_video(
 
     stem = f"journey_{job_id}" if job_id else output_mp4.stem
     steps_with_shots = [s for s in steps if s.screenshot_path and Path(s.screenshot_path).exists()]
+
+    # Accuracy pass: click rings, step labels, mild zoom on focus frames
+    prep_t0 = time.monotonic()
+    try:
+        prepared = prepare_demo_frames(steps_with_shots, work_dir, apply_zoom=True, theme=brand)
+        if prepared and len(prepared) == len(steps_with_shots):
+            source_frames = prepared
+            # Keep original capture paths on steps for API/timeline; use prepared only for render.
+            for s, p in zip(steps_with_shots, prepared):
+                if not getattr(s, "render_path", None):
+                    try:
+                        s.render_path = str(p)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+            # Drop only true-duplicate consecutive result frames; never drop focus frames
+            keep_steps = []
+            keep_frames = []
+            prev_path = None
+            for s, p in zip(steps_with_shots, prepared):
+                role = (getattr(s, "frame_role", "") or "")
+                if role != "focus" and prev_path is not None:
+                    try:
+                        from app.frame_dedup import frames_are_duplicates
+                        if frames_are_duplicates(prev_path, p):
+                            continue
+                    except Exception:
+                        pass
+                keep_steps.append(s)
+                keep_frames.append(p)
+                prev_path = p
+            if keep_frames and len(keep_frames) < len(prepared):
+                logger.debug(
+                    "render_journey_video: dropped duplicate result frames",
+                    extra={
+                        "operation": "frame_dedup",
+                        "job_id": job_id,
+                        "frames_before": len(prepared),
+                        "frames_after": len(keep_frames),
+                    },
+                )
+                steps_with_shots = keep_steps
+                source_frames = keep_frames
+                prepared = keep_frames
+        prep_sec = time.monotonic() - prep_t0
+        logger.debug(
+            "render_journey_video: prepare_demo_frames completed",
+            extra={
+                "operation": "prepare_demo_frames",
+                "job_id": job_id,
+                "frame_count": len(prepared) if prepared else 0,
+                "duration_sec": round(prep_sec, 3),
+            },
+        )
+    except Exception as e:
+        logger.warning(
+            "render_journey_video: prepare_demo_frames failed; using raw screenshots",
+            extra={
+                "operation": "prepare_demo_frames",
+                "job_id": job_id,
+                "error": f"{type(e).__name__}: {e}",
+            },
+            exc_info=True,
+        )
+
+    # Focus frames get slightly shorter default holds so the click feels snappy
+    for s in steps_with_shots:
+        if (s.frame_role or "") == "focus" and not s.duration_sec:
+            s.duration_sec = max(1.2, SHIPVIDEO_AUDIT_FRAME_SECONDS * 0.65)
+
     narrations = [
         (s.subtitle or "").strip() or f"Step {i + 1}"
         for i, s in enumerate(steps_with_shots)
     ]
+    if language != "en":
+        try:
+            narrations = translate_lines(narrations, language)
+            for s, line in zip(steps_with_shots, narrations):
+                s.subtitle = line
+        except Exception as e:
+            logger.debug(
+                "render_journey_video: i18n translate failed; keeping English",
+                extra={
+                    "operation": "i18n_captions",
+                    "job_id": job_id,
+                    "language": language,
+                    "error": f"{type(e).__name__}: {e}",
+                },
+                exc_info=True,
+            )
 
     # Waveform-based timing: silencedetect on captured audio, else TTS + silencedetect.
     audio_t0 = time.monotonic()
@@ -274,12 +492,18 @@ def render_journey_video(
         cues = build_subtitles(steps, seconds_per_frame=seconds_per_frame)
 
     # Drive frame hold times from cue spans (speech-aligned), then enforce 60s cap.
+    # Focus frames stay snappy; result frames get a slight hold so UI is readable.
     frame_durations: List[float] = []
     for i, step in enumerate(steps_with_shots):
         if i < len(cues):
             dur = max(0.05, float(cues[i]["end"]) - float(cues[i]["start"]))
         else:
             dur = seconds_per_frame
+        role = (getattr(step, "frame_role", "") or "").strip()
+        if role == "focus":
+            dur = max(0.8, min(dur, dur * 0.75))
+        elif role == "result" and getattr(step, "proof_status", ""):
+            dur = max(dur, min(dur * 1.08, seconds_per_frame * 1.2))
         frame_durations.append(dur)
         step.duration_sec = dur
 
@@ -313,6 +537,22 @@ def render_journey_video(
     ass_path = work_dir / f"{stem}.ass"
     write_srt(cues, srt_path)
     write_ass(cues, ass_path)
+    srt_lang_path = None
+    if language != "en":
+        try:
+            srt_lang_path = work_dir / f"{stem}.{language}.srt"
+            write_translated_srt(cues, srt_lang_path, language)
+        except Exception as e:
+            logger.debug(
+                "render_journey_video: translated srt failed",
+                extra={
+                    "operation": "i18n_srt",
+                    "job_id": job_id,
+                    "language": language,
+                    "error": f"{type(e).__name__}: {e}",
+                },
+                exc_info=True,
+            )
 
     # Persist silence analysis for debugging / demos
     import json
@@ -342,8 +582,14 @@ def render_journey_video(
         for i, step in enumerate(steps_with_shots):
             caption = step.subtitle or (cues[i]["text"] if i < len(cues) else "")
             out_img = captioned_dir / f"cap_{i:03d}.png"
+            # Prefer polished render frame (brand/progress/zoom) when available
+            src_frame = (
+                source_frames[i]
+                if i < len(source_frames)
+                else Path(getattr(step, "render_path", None) or step.screenshot_path)
+            )
             try:
-                _burn_caption_on_image(Path(step.screenshot_path), caption, out_img)
+                _burn_caption_on_image(Path(src_frame), caption, out_img)
                 frames.append(out_img)
                 subtitles_burned = True
             except Exception as e:
@@ -354,12 +600,12 @@ def render_journey_video(
                         "operation": "burn_caption",
                         "job_id": job_id,
                         "frame_index": i,
-                        "frame_path": str(step.screenshot_path),
+                        "frame_path": str(src_frame),
                         "error": f"{type(e).__name__}: {e}",
                     },
                     exc_info=True,
                 )
-                frames.append(Path(step.screenshot_path))
+                frames.append(Path(src_frame))
         if burn_failures:
             logger.warning(
                 "render_journey_video: caption burn degraded",
@@ -393,10 +639,80 @@ def render_journey_video(
         frame_durations.append(frame_durations[-1] if frame_durations else 2.8)
     frame_durations = frame_durations[: len(frames)]
 
+    # Parallel flags for Ken Burns (focus content only; intro/outro added later)
+    frame_is_focus: List[bool] = [
+        (getattr(s, "frame_role", "") or "") == "focus"
+        for s in steps_with_shots[: len(frames)]
+    ]
+    while len(frame_is_focus) < len(frames):
+        frame_is_focus.append(False)
+
     scale_pad = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
     )
+
+    intro_title = (
+        (steps_with_shots[0].title or steps_with_shots[0].label or "Product journey").strip()[:70]
+        if steps_with_shots else "Product journey"
+    )
+    # Intro / outro title cards (Arcade/Storylane-style polish)
+    cards_dir = work_dir / "cards"
+    cards_dir.mkdir(parents=True, exist_ok=True)
+    intro_path = cards_dir / "intro.png"
+    outro_path = cards_dir / "outro.png"
+    try:
+        from app.render_effects.i18n_captions import translate_phrase
+        intro_sub = translate_phrase("Proof-gated walkthrough", language)
+        outro_title = translate_phrase("Thanks for watching", language)
+        outro_sub = translate_phrase("Generated by ShipVideo", language)
+        make_title_card(
+            intro_path,
+            title=intro_title,
+            subtitle=intro_sub,
+            footer=brand.name,
+            size=(width, height),
+            style="intro",
+            theme=brand,
+        )
+        make_title_card(
+            outro_path,
+            title=outro_title,
+            subtitle=outro_sub,
+            footer=brand.name,
+            size=(width, height),
+            style="outro",
+            theme=brand,
+        )
+        intro_dur = 1.4
+        outro_dur = 1.2
+        # Fit intro/outro under remaining budget when possible
+        budget = max_total_seconds - sum(frame_durations)
+        if budget < intro_dur + outro_dur and sum(frame_durations) > 0:
+            scale = max(0.5, (sum(frame_durations) - 0.1) / (sum(frame_durations) + intro_dur + outro_dur))
+            frame_durations = [max(0.05, d * scale) for d in frame_durations]
+            for i, step in enumerate(steps_with_shots):
+                if i < len(frame_durations):
+                    step.duration_sec = frame_durations[i]
+        if intro_path.exists():
+            frames = [intro_path] + list(frames)
+            frame_durations = [intro_dur] + list(frame_durations)
+            frame_is_focus = [False] + list(frame_is_focus)
+        if outro_path.exists():
+            frames = list(frames) + [outro_path]
+            frame_durations = list(frame_durations) + [outro_dur]
+            frame_is_focus = list(frame_is_focus) + [False]
+        total_duration = sum(frame_durations)
+    except Exception as e:
+        logger.debug(
+            "render_journey_video: title cards skipped",
+            extra={
+                "operation": "title_cards",
+                "job_id": job_id,
+                "error": f"{type(e).__name__}: {e}",
+            },
+            exc_info=True,
+        )
 
     silent_mp4 = work_dir / f"{stem}_silent.mp4"
     if len(frames) == 1:
@@ -414,7 +730,25 @@ def render_journey_video(
         input_args: List[str] = []
         for frame, dur in zip(frames, frame_durations):
             input_args.extend(["-loop", "1", "-t", str(dur), "-i", str(frame)])
-        filter_chains = "".join(f"[{i}:v]{scale_pad}[v{i}];" for i in range(len(frames)))
+        filter_parts: List[str] = []
+        for i in range(len(frames)):
+            dur = float(frame_durations[i])
+            use_kb = bool(ken_burns and i < len(frame_is_focus) and frame_is_focus[i] and dur >= 0.8)
+            if use_kb:
+                frames_n = max(8, int(round(dur * 30)))
+                # Slow zoom-in toward center (focus already pre-cropped when possible)
+                zp = (
+                    f"scale={width * 2}:{height * 2}:force_original_aspect_ratio=increase,"
+                    f"crop={width * 2}:{height * 2},"
+                    f"zoompan=z='min(1.0+0.0012*on,1.12)':d={frames_n}:"
+                    f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                    f"s={width}x{height}:fps=30,"
+                    f"format=yuv420p"
+                )
+                filter_parts.append(f"[{i}:v]{zp}[v{i}]")
+            else:
+                filter_parts.append(f"[{i}:v]{scale_pad},format=yuv420p[v{i}]")
+        filter_chains = "".join(p + ";" for p in filter_parts)
         concat_inputs = "".join(f"[v{i}]" for i in range(len(frames)))
         concat_filter = (
             f"{filter_chains}{concat_inputs}concat=n={len(frames)}:v=1:a=0,format=yuv420p"
@@ -541,10 +875,124 @@ def render_journey_video(
         },
     )
 
+    # Packaging: chapters, YouTube description, thumbnail (share-ready like Arcade)
+    chapters_meta: List[Any] = []
+    chapters_vtt = work_dir / f"{stem}.chapters.vtt"
+    chapters_txt = work_dir / f"{stem}.chapters.txt"
+    yt_desc_path = work_dir / f"{stem}.youtube.txt"
+    thumb_path = work_dir / f"{stem}_thumb.jpg"
+    try:
+        holds = list(frame_durations)
+        # Chapters from content steps only (exclude intro/outro cards)
+        chapters_meta = chapter_entries_from_steps(
+            steps_with_shots,
+            hold_seconds=[
+                float(getattr(s, "duration_sec", 0) or seconds_per_frame)
+                for s in steps_with_shots
+            ],
+        )
+        # Offset chapter starts if intro card was prepended
+        intro_offset = 0.0
+        if frames and frames[0].name == "intro.png":
+            intro_offset = float(frame_durations[0]) if frame_durations else 1.4
+            for ch in chapters_meta:
+                ch["start"] = float(ch["start"]) + intro_offset
+            if chapters_meta:
+                # Keep first chapter labelable; YouTube wants 0:00 first line separately
+                pass
+        write_webvtt_chapters(
+            chapters_meta,
+            chapters_vtt,
+            total_duration=total_duration,
+        )
+        write_youtube_chapters_text(chapters_meta, chapters_txt)
+        write_youtube_description(
+            yt_desc_path,
+            title=intro_title,
+            steps=steps_with_shots,
+            chapters=chapters_meta,
+            proven_clicks=sum(
+                1
+                for s in steps_with_shots
+                if (getattr(s, "proof_status", "") or "")
+                in ("url_changed", "same_page", "proven")
+            ),
+        )
+        # Thumbnail from first focus frame else first result
+        thumb_src = None
+        for s in steps_with_shots:
+            if (getattr(s, "frame_role", "") or "") == "focus" and s.screenshot_path:
+                thumb_src = s.screenshot_path
+                break
+        if not thumb_src and steps_with_shots:
+            thumb_src = steps_with_shots[0].screenshot_path
+        if thumb_src and Path(thumb_src).exists():
+            make_thumbnail(
+                thumb_src,
+                thumb_path,
+                title=intro_title,
+                subtitle="Auto-generated walkthrough",
+                size=(width, height),
+                theme=brand,
+            )
+    except Exception as e:
+        logger.debug(
+            "render_journey_video: packaging artifacts failed",
+            extra={
+                "operation": "packaging",
+                "job_id": job_id,
+                "error": f"{type(e).__name__}: {e}",
+            },
+            exc_info=True,
+        )
+
+    sizzle_path = work_dir / f"{stem}_sizzle.mp4"
+    if export_sizzle:
+        try:
+            content_frames = []
+            content_durs = []
+            content_bboxes = []
+            for i, s in enumerate(steps_with_shots):
+                frame = None
+                rp = getattr(s, "render_path", None)
+                if rp and Path(rp).exists():
+                    frame = Path(rp)
+                elif i < len(source_frames) and Path(source_frames[i]).exists():
+                    frame = Path(source_frames[i])
+                elif s.screenshot_path and Path(s.screenshot_path).exists():
+                    frame = Path(s.screenshot_path)
+                if frame is None:
+                    continue
+                content_frames.append(frame)
+                content_durs.append(float(getattr(s, "duration_sec", 0) or seconds_per_frame))
+                content_bboxes.append(s.click_bbox if isinstance(s.click_bbox, dict) else None)
+            if content_frames:
+                export_sizzle_mp4(
+                    content_frames,
+                    sizzle_path,
+                    durations=content_durs,
+                    bboxes=content_bboxes,
+                    work_dir=work_dir / "sizzle_work",
+                    max_seconds=15.0,
+                )
+        except Exception as e:
+            logger.debug(
+                "render_journey_video: sizzle export failed",
+                extra={
+                    "operation": "sizzle_export",
+                    "job_id": job_id,
+                    "error": f"{type(e).__name__}: {e}",
+                },
+                exc_info=True,
+            )
+
     return {
         "video": str(output_mp4),
         "srt": str(srt_path),
         "ass": str(ass_path),
+        "srt_lang": str(srt_lang_path) if srt_lang_path and Path(srt_lang_path).exists() else None,
+        "language": language,
+        "brand": brand.to_dict(),
         "frames": len(frames),
         "subtitles_burned": subtitles_burned,
         "cues": cues,
@@ -557,4 +1005,11 @@ def render_journey_video(
         "speech_segments": audio_pack.get("speech_segments"),
         "silencedetect_command": audio_pack.get("silencedetect", {}).get("command_str"),
         "silencedetect": audio_pack.get("silencedetect"),
+        "chapters": chapters_meta,
+        "chapters_vtt": str(chapters_vtt) if chapters_vtt.exists() else None,
+        "chapters_txt": str(chapters_txt) if chapters_txt.exists() else None,
+        "youtube_description": str(yt_desc_path) if yt_desc_path.exists() else None,
+        "thumbnail": str(thumb_path) if thumb_path.exists() else None,
+        "sizzle": str(sizzle_path) if sizzle_path.exists() else None,
+        "ken_burns": bool(ken_burns),
     }

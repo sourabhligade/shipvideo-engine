@@ -51,3 +51,7 @@ out.mp4
 
 # OS junk
 .DS_Store
+
+# Local E2E / job data
+data/
+

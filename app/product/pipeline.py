@@ -95,11 +95,24 @@ def run_link_to_video(
     max_steps: int = 10,
     use_azure_subtitles: bool = False,
     on_progress: ProgressCb = None,
+    language: str = "en",
+    brand: Optional[Any] = None,
+    export_sizzle: bool = True,
 ) -> Dict[str, Any]:
     job_dir = Path(job_dir)
     job_dir.mkdir(parents=True, exist_ok=True)
     if not job_id:
         job_id = job_dir.name
+
+    from app.product.brand_theme import BrandTheme, DEFAULT_BRAND
+    if brand is None:
+        brand_theme = DEFAULT_BRAND
+    elif isinstance(brand, BrandTheme):
+        brand_theme = brand
+    elif isinstance(brand, dict):
+        brand_theme = BrandTheme.from_dict(brand)
+    else:
+        brand_theme = DEFAULT_BRAND
 
     def emit(stage: str, **extra: Any) -> None:
         if on_progress:
@@ -260,7 +273,34 @@ def run_link_to_video(
         work_dir=job_dir,
         job_id=job_id,
         max_total_seconds=SHIPVIDEO_AUDIT_MAX_VIDEO_SECONDS,
+        brand=brand_theme,
+        language=language,
+        export_sizzle=export_sizzle,
+        ken_burns=True,
     )
+    gif_path = job_dir / f"journey_{job_id}.gif"
+    try:
+        from app.render_effects.gif_export import export_gif
+        frame_paths = []
+        for s in plan.steps:
+            rp = getattr(s, "render_path", None)
+            if rp and Path(rp).exists():
+                frame_paths.append(str(rp))
+            elif s.screenshot_path and Path(s.screenshot_path).exists():
+                frame_paths.append(s.screenshot_path)
+        if frame_paths:
+            export_gif(frame_paths, gif_path)
+            render_meta["gif"] = str(gif_path)
+    except Exception as e:
+        logger.debug(
+            "run_link_to_video: gif export skipped",
+            extra={
+                "operation": "gif_export",
+                "job_id": job_id,
+                "error": f"{type(e).__name__}: {e}",
+            },
+            exc_info=True,
+        )
     render_duration_sec = time.monotonic() - render_t0
     _ren_log = logger.warning if render_duration_sec > 120.0 else logger.debug
     _ren_log(
@@ -293,6 +333,25 @@ def run_link_to_video(
     )
 
     out_bytes = out_path.stat().st_size if out_path.exists() else 0
+    try:
+        import json as _json
+        accuracy_path = job_dir / f"journey_{job_id}_accuracy.json"
+        accuracy_path.write_text(
+            _json.dumps(
+                {
+                    "proven_clicks": int(getattr(plan, "proven_clicks", 0) or 0),
+                    "failed_clicks": int(getattr(plan, "failed_clicks", 0) or 0),
+                    "step_count": len(plan.steps),
+                    "focus_frames": sum(1 for s in plan.steps if getattr(s, "frame_role", "") == "focus"),
+                    "end_reason": plan.end_reason,
+                    "accuracy_ok": bool(int(getattr(plan, "proven_clicks", 0) or 0) > 0 or len(plan.steps) <= 1),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
     logger.debug(
         "run_link_to_video: completed with counts",
         extra={
@@ -320,9 +379,17 @@ def run_link_to_video(
             "label": s.label,
             "subtitle": s.subtitle,
             "screenshot": Path(s.screenshot_path).name if s.screenshot_path else "",
+            "frame_role": getattr(s, "frame_role", "result") or "result",
+            "proof_status": getattr(s, "proof_status", "") or "",
+            "click_bbox": getattr(s, "click_bbox", None),
         }
         for s in plan.steps
     ]
+
+    proven = int(getattr(plan, "proven_clicks", 0) or 0)
+    failed = int(getattr(plan, "failed_clicks", 0) or 0)
+    # Accuracy gate: multi-step journeys should have at least one proven interaction
+    accuracy_ok = proven > 0 or len(plan.steps) <= 1
 
     return {
         "ok": True,
@@ -330,8 +397,22 @@ def run_link_to_video(
         "start_url": plan.start_url,
         "end_reached": plan.end_reached,
         "end_reason": plan.end_reason,
+        "proven_clicks": proven,
+        "failed_clicks": failed,
+        "accuracy_ok": accuracy_ok,
         "steps": step_payload,
         "video_path": str(out_path),
+        "gif_path": render_meta.get("gif"),
+        "thumbnail": render_meta.get("thumbnail"),
+        "sizzle": render_meta.get("sizzle"),
+        "language": render_meta.get("language") or language,
+        "brand": render_meta.get("brand") or brand_theme.to_dict(),
+        "srt_lang": render_meta.get("srt_lang"),
+        "ken_burns": render_meta.get("ken_burns"),
+        "chapters": render_meta.get("chapters"),
+        "chapters_vtt": render_meta.get("chapters_vtt"),
+        "chapters_txt": render_meta.get("chapters_txt"),
+        "youtube_description": render_meta.get("youtube_description"),
         "srt_path": render_meta.get("srt"),
         "subtitles_burned": render_meta.get("subtitles_burned"),
         "cues": render_meta.get("cues"),

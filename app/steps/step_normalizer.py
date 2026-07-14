@@ -74,9 +74,17 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 if val is not None:
                     base[field] = val
 
+            # Keep locator signals even when label is primary — improves click accuracy
+            if selector and "selector" not in base:
+                base["selector"] = selector
+            testid = (step.get("testid") or step.get("expected_testid") or "").strip()
+            if testid:
+                base["testid"] = testid
+                if "selector" not in base:
+                    base["selector"] = f"[data-testid='{testid}']"
 
             for field in ("dom_confirmed", "match_confidence",
-                          "dom_warning", "contract_missing"):
+                          "dom_warning", "contract_missing", "bbox"):
                 val = step.get(field)
                 if val is not None:
                     base[field] = val

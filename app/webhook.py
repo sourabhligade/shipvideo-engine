@@ -408,7 +408,25 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                     extra_note = None
                     if budget_exceeded:
                         extra_note = "**Monthly budget limit reached.** This demo used fallback steps (no LLM)."
-                    comment_on_pr(repo_full_name, pr_number, video_url, extra_note=extra_note)
+                    accuracy_meta = None
+                    try:
+                        ra = (capture_summary or {}).get("render_approval") or {}
+                        metrics = (capture_summary or {}).get("metrics") or {}
+                        accuracy_meta = {
+                            "proven_clicks": metrics.get("steps_validated") or metrics.get("proven_clicks"),
+                            "failed_clicks": metrics.get("steps_failed") or metrics.get("failed_clicks"),
+                            "accuracy_ok": bool(ra.get("is_sendable", True)),
+                            "reasons": ra.get("reasons") or [],
+                        }
+                    except Exception:
+                        accuracy_meta = None
+                    comment_on_pr(
+                        repo_full_name,
+                        pr_number,
+                        video_url,
+                        extra_note=extra_note,
+                        accuracy=accuracy_meta,
+                    )
                 except Exception as e:
 
                     err_text = f"{type(e).__name__}: {e}"

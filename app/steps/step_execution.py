@@ -60,6 +60,29 @@ def _normalize_success_condition(raw: Any) -> Optional[SuccessCondition]:
     return SuccessCondition(type=cond_type, value=cond_value)
 
 
+
+def _infer_click_proof(step: Dict[str, Any]) -> Optional[SuccessCondition]:
+    """Derive a strict proof condition from locator fields when the LLM omitted one."""
+    expected_url = str(step.get("expected_url") or "").strip()
+    if expected_url:
+        return SuccessCondition(type="url_match", value=expected_url)
+
+    testid = str(step.get("testid") or step.get("expected_testid") or "").strip()
+    if testid:
+        return SuccessCondition(type="element_present", value=f"[data-testid='{testid}']")
+
+    selector = str(step.get("selector") or "").strip()
+    if selector.startswith("[data-testid"):
+        return SuccessCondition(type="element_present", value=selector)
+
+    # Prefer post-click text proof only for short labels (avoid noisy long strings)
+    label = str(step.get("label") or step.get("text") or "").strip()
+    if label and 1 <= len(label.split()) <= 4 and len(label) <= 40:
+        # Not a strong proof alone — skip auto-inference for free text labels
+        return None
+    return None
+
+
 def _attach_test_case_success_conditions(
     steps: List[Dict[str, Any]],
     test_case_id: str,
@@ -70,6 +93,10 @@ def _attach_test_case_success_conditions(
             _normalize_success_condition(step.get("validation_condition"))
             or _normalize_success_condition(step.get("success_condition"))
         )
+        if explicit is None and (step.get("action") or "").strip() == "click":
+            explicit = _infer_click_proof(step)
+            if explicit is not None:
+                step.setdefault("validation_source", "inferred")
         if explicit is not None:
             step["validation_condition"] = explicit
             step.setdefault("success_condition", explicit)
@@ -257,6 +284,19 @@ def _build_render_approval(
         reasons.append("expected_changed_target_not_shown")
     if not expected_proof_satisfied:
         reasons.append("expected_proof_not_satisfied")
+
+    click_results = [
+        r for r in results
+        if str((r.get("step") or {}).get("action") or "") == "click"
+    ]
+    unvalidated_clicks = [
+        r for r in click_results
+        if str(r.get("outcome") or "") == "unvalidated"
+    ]
+    if click_results and len(unvalidated_clicks) == len(click_results):
+        reasons.append("all_clicks_unvalidated")
+    elif unvalidated_clicks and not expected_proof_satisfied:
+        reasons.append("unvalidated_clicks_present")
 
     return {
         "is_sendable": len(reasons) == 0,
