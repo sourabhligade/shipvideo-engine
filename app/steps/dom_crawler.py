@@ -133,6 +133,7 @@ async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
             text: (e.innerText || e.value || "").trim().slice(0, 80),
             testid: e.getAttribute('data-testid') || "",
             aria: e.getAttribute('aria-label') || "",
+            title: (e.getAttribute('title') || "").trim().slice(0, 80),
             id: e.id || "",
             classes: e.className || ""
         }))""",
@@ -176,7 +177,7 @@ async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
             "text":     meta.get("text", ""),
             "testid":   meta.get("testid", ""),
             "aria":     meta.get("aria", ""),
-            "title":    "",                                                              
+            "title":    meta.get("title", ""),
             "id":       meta.get("id", ""),
             "role":     "button",
             "selector": _short_selector(meta, "button"),
