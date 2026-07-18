@@ -266,8 +266,18 @@ def _merge_snapshots(route_snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, An
                 merged_links.append(link)
 
         for inp in (ui.get("inputs") or []):
-            key = (inp.get("name") or "") + "|" + (inp.get("placeholder") or "")
-            key = key.strip("|")
+            testid = (inp.get("testid") or "").strip()
+            name = (inp.get("name") or "").strip()
+            placeholder = (inp.get("placeholder") or "").strip()
+            aria = (inp.get("aria") or "").strip()
+            el_id = (inp.get("id") or "").strip()
+            input_type = (inp.get("input_type") or "").strip()
+            if testid:
+                key = f"testid:{testid}"
+            elif name or placeholder:
+                key = f"name:{name}|ph:{placeholder}"
+            else:
+                key = f"aria:{aria}|id:{el_id}|type:{input_type}".strip("|")
             if key and key not in seen_inp:
                 seen_inp.add(key)
                 merged_inputs.append(inp)

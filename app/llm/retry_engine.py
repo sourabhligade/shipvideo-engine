@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.sync_api import Page
 
 from app.llm.step_generator import generate_next_steps, generate_single_step_toward_testid
 from app.policy.selector_validator import validate_step_against_dom
+
+# Recoverable generation failures: LLM transport, parse, and empty-payload errors.
+_RETRYABLE_GENERATION_ERRORS = (RuntimeError, ValueError, json.JSONDecodeError, TypeError, KeyError)
 
 
 def regenerate_with_feedback(
@@ -27,8 +31,13 @@ def regenerate_with_feedback(
                 previous_error=previous_error,
                 max_steps=2,
             )
-        except RuntimeError as e:
-            attempts.append({"attempt": i, "status": "generation_error", "error": str(e)})
+        except _RETRYABLE_GENERATION_ERRORS as e:
+            attempts.append({
+                "attempt": i,
+                "status": "generation_error",
+                "error": str(e),
+                "error_type": type(e).__name__,
+            })
             previous_error = {"error": str(e)}
             continue
         if not steps:
@@ -71,8 +80,13 @@ def regenerate_single_step_toward_testid(
                 objective=objective,
                 previous_error=previous_error,
             )
-        except RuntimeError as e:
-            attempts.append({"attempt": i, "status": "generation_error", "error": str(e)})
+        except _RETRYABLE_GENERATION_ERRORS as e:
+            attempts.append({
+                "attempt": i,
+                "status": "generation_error",
+                "error": str(e),
+                "error_type": type(e).__name__,
+            })
             previous_error = {"error": str(e)}
             continue
         ok, reason = validate_step_against_dom(step, dom_context, page=page)

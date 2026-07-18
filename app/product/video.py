@@ -12,6 +12,7 @@ from app.product.audio_timing import prepare_audio_and_cues
 SHIPVIDEO_AUDIT_FRAME_SECONDS = 2.8
 SHIPVIDEO_AUDIT_VIEWPORT = (1280, 720)
 SHIPVIDEO_AUDIT_MAX_VIDEO_SECONDS = 60.0
+FFMPEG_TIMEOUT_SECONDS: float = 120.0
 
 
 def allocate_frame_durations(
@@ -298,29 +299,53 @@ def render_journey_video(
             str(silent_mp4),
         ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            f"[product.video] ffmpeg slideshow timeout after {FFMPEG_TIMEOUT_SECONDS}s",
+            flush=True,
+        )
+        raise RuntimeError(
+            f"ffmpeg slideshow timed out after {FFMPEG_TIMEOUT_SECONDS}s"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg slideshow failed: {result.stderr or result.stdout}")
 
     # Mux narration audio when present
     audio_path = audio_pack.get("audio_path")
     if audio_path and Path(audio_path).exists():
-        mux = subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-i", str(silent_mp4),
-                "-i", str(audio_path),
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-shortest",
-                "-movflags", "+faststart",
-                str(output_mp4),
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if mux.returncode != 0:
+        try:
+            mux = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-i", str(silent_mp4),
+                    "-i", str(audio_path),
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-shortest",
+                    "-movflags", "+faststart",
+                    str(output_mp4),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=FFMPEG_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"[product.video] ffmpeg mux timeout after {FFMPEG_TIMEOUT_SECONDS}s; "
+                "falling back to silent video",
+                flush=True,
+            )
             output_mp4.write_bytes(silent_mp4.read_bytes())
+        else:
+            if mux.returncode != 0:
+                output_mp4.write_bytes(silent_mp4.read_bytes())
     else:
         output_mp4.write_bytes(silent_mp4.read_bytes())
 

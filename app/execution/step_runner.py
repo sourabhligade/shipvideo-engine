@@ -106,6 +106,7 @@ def _classify_final_outcome(*, success: bool, failure_reason: str = "") -> str:
         "wrong_click",
         "stale_ref",
         "stale_ref_unrecovered",
+        "navigation_reanchor_failed",
     )
     if reason.startswith(regression_prefixes):
         return "regressed"
@@ -1906,7 +1907,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)
                 _log("step.regenerated_on_validation_failure", {"index": i, "reason": reason, "attempts": attempts})
                 if not regenerated:
                     browser.close()
@@ -1935,7 +1936,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)
                 _log("step.regenerated_on_execution_failure", {"index": i, "error": err, "attempts": attempts})
                 if not regenerated:
                     browser.close()
@@ -1976,10 +1977,24 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)
                 _log("navigation.reanchored", {"index": i, "attempts": attempts})
                 if regenerated:
                     queue = queue[: i + 1] + regenerated
+                else:
+                    browser.close()
+                    return {
+                        "success": False,
+                        "final_outcome": _classify_final_outcome(
+                            success=False,
+                            failure_reason="navigation_reanchor_failed",
+                        ),
+                        "steps_succeeded": len(results),
+                        "steps_failed": 1,
+                        "failure_reason": "navigation_reanchor_failed",
+                        "results": results,
+                        "metrics": _build_metrics(results, len(initial_steps), total_retries),
+                    }
             i += 1
 
         browser.close()

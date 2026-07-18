@@ -10,6 +10,7 @@ SHIPVIDEO_AUDIT_SILENCE_NOISE_DB = -40
 SHIPVIDEO_AUDIT_SILENCE_MIN_DURATION = 0.08
 SHIPVIDEO_AUDIT_MAX_VIDEO_SECONDS = 60.0
 SHIPVIDEO_AUDIT_GAP_BETWEEN_CLIPS = 0.35
+FFMPEG_TIMEOUT_SECONDS: float = 120.0
 
 
 def _which(name: str) -> Optional[str]:
@@ -147,6 +148,7 @@ def build_narration_audio(
         check=False,
         capture_output=True,
         text=True,
+        timeout=FFMPEG_TIMEOUT_SECONDS,
     )
 
     concat_list = work_dir / f"{stem}_concat.txt"
@@ -174,6 +176,7 @@ def build_narration_audio(
         ],
         capture_output=True,
         text=True,
+        timeout=FFMPEG_TIMEOUT_SECONDS,
     )
     if proc.returncode != 0:
         # re-encode fallback
@@ -186,6 +189,7 @@ def build_narration_audio(
             ],
             capture_output=True,
             text=True,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"concat narration failed: {proc.stderr}")
@@ -217,6 +221,7 @@ def build_narration_audio(
             check=True,
             capture_output=True,
             text=True,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
         )
         combined = sped
         # scale spans
@@ -503,6 +508,7 @@ def prepare_audio_and_cues(
             check=True,
             capture_output=True,
             text=True,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
         )
         audio_path = extracted
         audio_source = "captured"
