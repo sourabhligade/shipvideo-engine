@@ -372,16 +372,20 @@ async def crawl_dom_data(
 
 
         merged = _merge_snapshots(route_snapshots)
-        all_routes = sorted(set(discovered_routes) | set(seed_routes or []))
+        # Only successfully crawled routes are authoritative for real_routes/goto.
+        crawled_routes = sorted(route_snapshots.keys())
+        if not crawled_routes:
+            crawled_routes = ["/"]
 
         return {
             "current_path":    "/",
-            "routes":          all_routes or ["/"],
+            "routes":          crawled_routes,
             "buttons":         merged["buttons"],
             "links":           merged["links"],
             "inputs":          merged["inputs"],
             "data_testids":    merged["data_testids"],
-            "route_snapshots": route_snapshots,                                  
+            "route_snapshots": route_snapshots,
+            "discovered_routes": sorted(set(discovered_routes) | set(seed_routes or [])),
         }
 
     except Exception as e:

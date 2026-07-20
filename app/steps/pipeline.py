@@ -33,6 +33,8 @@ async def analyze_pr(
     *,
     diff_files: Optional[List[Dict[str, str]]] = None,
     start_route: Optional[str] = None,
+    force: bool = False,
+    comment_triggered: bool = False,
 ) -> Dict[str, Any]:
     try:
         print("\n[steps.pipeline] === ANALYZE PR (diff → steps) ===", flush=True)
@@ -63,9 +65,16 @@ async def analyze_pr(
         )
 
         config = load_config()
-        decision = evaluate_trigger(diff_files, config)
+        decision = evaluate_trigger(
+            diff_files,
+            config,
+            force=force,
+            comment_triggered=comment_triggered,
+        )
         print(
             f"[steps.pipeline/analyze_pr] trigger should_run={decision.should_run} "
+            f"force={force} comment_triggered={comment_triggered} "
+            f"general_demo={decision.general_demo} "
             f"reason={decision.reason!r}",
             flush=True,
         )
