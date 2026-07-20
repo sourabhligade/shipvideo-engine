@@ -4,7 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from playwright.sync_api import Page, sync_playwright
@@ -1740,6 +1740,40 @@ def _terminal_match_in_snapshot(snapshot: Dict[str, Any], expected: str) -> bool
     return False
 
 
+def _resolve_terminal_expectation(step: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """Normalize assert_terminal fields into a condition + expected element/text/url value."""
+    raw_condition = step.get("condition") if isinstance(step.get("condition"), dict) else {}
+    condition: Dict[str, Any] = dict(raw_condition or {})
+    cond_type = str(condition.get("type") or "").strip()
+    cond_value = str(condition.get("value") or "").strip()
+    expected_element = str(step.get("expected_element") or "").strip()
+    expected_text = str(step.get("expected_text") or "").strip()
+    expected_url = str(step.get("expected_url") or "").strip()
+
+    if not cond_type:
+        if expected_url:
+            cond_type, cond_value = "url_match", expected_url
+        elif expected_text:
+            cond_type, cond_value = "text_present", expected_text
+        elif expected_element or cond_value:
+            cond_type = "element_present"
+            cond_value = expected_element or cond_value
+    else:
+        if cond_type == "url_match" and not cond_value:
+            cond_value = expected_url
+        elif cond_type == "text_present" and not cond_value:
+            cond_value = expected_text
+        elif cond_type == "element_present" and not cond_value:
+            cond_value = expected_element
+
+    if cond_type == "element_present" and not expected_element:
+        expected_element = cond_value
+
+    condition["type"] = cond_type
+    condition["value"] = cond_value
+    return condition, expected_element
+
+
 def _assert_ab_terminal_condition(
     cli: Any,
     *,
@@ -1749,33 +1783,57 @@ def _assert_ab_terminal_condition(
 ) -> Dict[str, Any]:
     cond_type = str(condition.get("type") or "").strip()
     cond_value = str(condition.get("value") or "").strip()
-    expected = expected_element or cond_value
-    if not cond_type and expected_element:
+    expected = (expected_element or cond_value or "").strip()
+    if not cond_type and expected:
         cond_type = "element_present"
-        cond_value = expected_element
+        cond_value = expected
     result: Dict[str, Any] = {
-        "found": True,
+        "found": False,
         "source": "none",
         "actual": "",
     }
 
+    if not cond_type or (cond_type != "element_present" and not cond_value) or (
+        cond_type == "element_present" and not expected
+    ):
+        result["source"] = "missing_terminal_condition"
+        return result
+
     if cond_type == "text_present" and cond_value:
         try:
             cli.wait_for_text(cond_value, timeout=AB_VALIDATION_WAIT_TIMEOUT_S)
+            result["found"] = True
             result["source"] = "wait_for_text"
             result["actual"] = cond_value
             return result
         except Exception:
-            pass
+            result["source"] = "text_present_failed"
+            result["actual"] = cond_value
+            return result
 
     if cond_type == "url_match" and cond_value:
         try:
             cli.wait_for_url(cond_value, timeout=AB_VALIDATION_WAIT_TIMEOUT_S)
+            result["found"] = True
             result["source"] = "wait_for_url"
-            result["actual"] = cli.get_url()
+            try:
+                result["actual"] = cli.get_url()
+            except Exception:
+                result["actual"] = cond_value
             return result
         except Exception:
-            pass
+            try:
+                current = cli.get_url()
+            except Exception:
+                current = ""
+            if cond_value and cond_value in str(current or ""):
+                result["found"] = True
+                result["source"] = "url_match_substring"
+                result["actual"] = current
+                return result
+            result["source"] = "url_match_failed"
+            result["actual"] = current or cond_value
+            return result
 
     if cond_type == "element_present" and expected:
         if _wait_for_ab_element_present(
@@ -1783,6 +1841,7 @@ def _assert_ab_terminal_condition(
             expected,
             timeout_s=AB_VALIDATION_WAIT_TIMEOUT_S,
         ):
+            result["found"] = True
             result["source"] = "wait_for_element_present"
             result["actual"] = expected
             return result
@@ -1791,6 +1850,7 @@ def _assert_ab_terminal_condition(
         if testid_ref:
             try:
                 if cli.is_visible(testid_ref):
+                    result["found"] = True
                     result["source"] = "find_testid_visible"
                     result["actual"] = testid_ref
                     return result
@@ -1805,6 +1865,7 @@ def _assert_ab_terminal_condition(
             if semantic_ref:
                 try:
                     if cli.is_visible(semantic_ref):
+                        result["found"] = True
                         result["source"] = "find_element_visible"
                         result["actual"] = semantic_ref
                         return result
@@ -1815,20 +1876,21 @@ def _assert_ab_terminal_condition(
         if semantic_ref:
             try:
                 if cli.is_visible(semantic_ref):
+                    result["found"] = True
                     result["source"] = "semantic_find_visible"
                     result["actual"] = semantic_ref
                     return result
             except Exception:
                 pass
 
-    if expected:
         terminal_snapshot = extract_snapshot(save_raw=False)
         found = _terminal_match_in_snapshot(terminal_snapshot, expected)
-        result["found"] = found
+        result["found"] = bool(found)
         result["source"] = "snapshot_visible_elements"
         result["actual"] = expected if found else ""
         return result
 
+    result["source"] = "missing_terminal_condition"
     return result
 
 
@@ -2243,58 +2305,58 @@ def run_ab_stepwise(
 
 
             if action == "assert_terminal":
-                condition = step.get("condition") or {}
-                expected_element = (
-                    step.get("expected_element")
-                    or (condition.get("value") if isinstance(condition, dict) else "")
-                    or ""
-                )
-                found = True
+                condition, expected_element = _resolve_terminal_expectation(step)
+                found = False
                 terminal_source = ""
                 terminal_actual = ""
-                if expected_element:
-                    try:
-                        terminal_result = _assert_ab_terminal_condition(
-                            cli,
-                            condition=condition if isinstance(condition, dict) else {},
-                            expected_element=str(expected_element),
-                            extract_snapshot=lambda **kwargs: extract_ab_context(cli, **kwargs),
-                        )
-                        found = bool(terminal_result.get("found"))
-                        terminal_source = str(terminal_result.get("source") or "")
-                        terminal_actual = str(terminal_result.get("actual") or "")
-                    except AgentBrowserError as exc:
-                        step_result.update(
-                            {
-                                "status": "failed",
-                                "outcome": "click_failed",
-                                "error": f"snapshot_failed:{exc}",
-                            }
-                        )
-                        _attach_ab_failure_diagnostics(cli, step_result)
-                        step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
-                        results.append(step_result)
-                        return {
-                            "success": False,
-                            "final_outcome": _classify_final_outcome(
-                                success=False,
-                                failure_reason=f"snapshot_failed:{exc}",
-                            ),
-                            "steps_succeeded": steps_succeeded,
-                            "steps_failed": 1,
-                            "failure_reason": f"snapshot_failed:{exc}",
-                            "results": results,
-                            "metrics": _build_metrics(results, len(initial_steps), _total_retries),
+                try:
+                    terminal_result = _assert_ab_terminal_condition(
+                        cli,
+                        condition=condition,
+                        expected_element=str(expected_element or ""),
+                        extract_snapshot=lambda **kwargs: extract_ab_context(cli, **kwargs),
+                    )
+                    found = bool(terminal_result.get("found"))
+                    terminal_source = str(terminal_result.get("source") or "")
+                    terminal_actual = str(terminal_result.get("actual") or "")
+                except AgentBrowserError as exc:
+                    step_result.update(
+                        {
+                            "status": "failed",
+                            "outcome": "click_failed",
+                            "error": f"snapshot_failed:{exc}",
                         }
+                    )
+                    _attach_ab_failure_diagnostics(cli, step_result)
+                    step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
+                    results.append(step_result)
+                    return {
+                        "success": False,
+                        "final_outcome": _classify_final_outcome(
+                            success=False,
+                            failure_reason=f"snapshot_failed:{exc}",
+                        ),
+                        "steps_succeeded": steps_succeeded,
+                        "steps_failed": 1,
+                        "failure_reason": f"snapshot_failed:{exc}",
+                        "results": results,
+                        "metrics": _build_metrics(results, len(initial_steps), _total_retries),
+                    }
 
                 step_result["terminal_condition_reached"] = found
                 step_result["terminal_validation_source"] = terminal_source
                 step_result["terminal_validation_actual"] = terminal_actual
                 step_result["outcome"] = "success" if found else "terminal_not_reached"
                 if not found:
+                    expected_repr = (
+                        expected_element
+                        or condition.get("value")
+                        or condition.get("type")
+                        or ""
+                    )
                     print(
                         f"[step_runner] terminal condition not reached: "
-                        f"expected={expected_element!r}",
+                        f"expected={expected_repr!r} source={terminal_source!r}",
                         flush=True,
                     )
                 step_result["status"] = "ok" if found else "failed"
