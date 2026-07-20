@@ -807,6 +807,39 @@ def _get_generation_context(objective: Optional[Dict[str, Any]]) -> Dict[str, An
     return generation_context if isinstance(generation_context, dict) else {}
 
 
+def _allowed_routes_from_objective(objective: Optional[Dict[str, Any]]) -> set:
+    """Generation-time routes (crawl / real_routes / start_route) for runtime goto authority."""
+    gc = _get_generation_context(objective)
+    routes: set = set()
+    for raw in gc.get("real_routes") or []:
+        r = str(raw or "").strip()
+        if r:
+            routes.add(r)
+    start = str(gc.get("start_route") or "").strip()
+    if start:
+        routes.add(start)
+    for raw in gc.get("start_route_candidates") or []:
+        r = str(raw or "").strip()
+        if r:
+            routes.add(r)
+    routes.add("/")
+    return routes
+
+
+def _merge_allowed_routes_into_dom_ctx(
+    dom_ctx: Dict[str, Any],
+    allowed_routes: Optional[set],
+) -> Dict[str, Any]:
+    if not allowed_routes:
+        return dom_ctx
+    merged = dict(dom_ctx or {})
+    existing = {str(r).strip() for r in (merged.get("routes") or []) if str(r).strip()}
+    existing |= {str(r).strip() for r in allowed_routes if str(r).strip()}
+    merged["routes"] = sorted(existing)
+    return merged
+
+
+
 def _objective_changed_testids(objective: Optional[Dict[str, Any]]) -> List[str]:
     generation_context = _get_generation_context(objective)
     changed_testids = generation_context.get("changed_testids") or []
@@ -1292,9 +1325,13 @@ def _recover_ab_prerequisite_steps(
             "blocked_target_present": True,
         }
 
+    ab_allowed = _allowed_routes_from_objective(objective)
+    ab_dom = _merge_allowed_routes_into_dom_ctx(
+        _ab_snapshot_to_dom_context(snap_after), ab_allowed
+    )
     regenerated, attempts = regenerate_with_feedback(
         objective=objective,
-        dom_context=_ab_snapshot_to_dom_context(snap_after),
+        dom_context=ab_dom,
         error_context={
             "error": "prerequisite_failure",
             "trigger_reason": trigger_reason,
@@ -1308,6 +1345,7 @@ def _recover_ab_prerequisite_steps(
         },
         max_attempts=1,
         page=None,
+        allowed_routes=ab_allowed,
     )
     if not regenerated:
         return {
@@ -2013,19 +2051,23 @@ def run_stepwise(
     shot_idx = 1
     total_retries = 0                                                  
 
+    allowed_routes = _allowed_routes_from_objective(objective)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": cs.viewport_width, "height": cs.viewport_height})
         page.goto(preview_url, wait_until="domcontentloaded", timeout=15000)
         wait_stable_after_navigation(page)
-        dom_ctx = extract_dom_context(page)
+        dom_ctx = _merge_allowed_routes_into_dom_ctx(extract_dom_context(page), allowed_routes)
 
         i = 0
         while i < len(queue):
             step = queue[i]
             _step_t0 = time.monotonic()                                  
 
-            ok, reason = validate_step_against_dom(step, dom_ctx, page=page)
+            ok, reason = validate_step_against_dom(
+                step, dom_ctx, page=page, allowed_routes=allowed_routes
+            )
             if not ok:
 
                 regenerated, attempts = regenerate_with_feedback(
@@ -2034,6 +2076,7 @@ def run_stepwise(
                     error_context={"error": reason, "failed_step": step},
                     max_attempts=max_retries_per_failure,
                     page=page,
+                    allowed_routes=allowed_routes,
                 )
                 total_retries += len(attempts)           
                 _log("step.regenerated_on_validation_failure", {"index": i, "reason": reason, "attempts": attempts})
@@ -2063,6 +2106,7 @@ def run_stepwise(
                     error_context={"error": err or "execution_failed", "failed_step": step},
                     max_attempts=max_retries_per_failure,
                     page=page,
+                    allowed_routes=allowed_routes,
                 )
                 total_retries += len(attempts)           
                 _log("step.regenerated_on_execution_failure", {"index": i, "error": err, "attempts": attempts})
@@ -2099,7 +2143,9 @@ def run_stepwise(
             nav_changed = detect_major_change(prev, now)
             if nav_changed:
                 wait_stable_after_navigation(page)
-                dom_ctx = extract_dom_context(page)
+                dom_ctx = _merge_allowed_routes_into_dom_ctx(
+                    extract_dom_context(page), allowed_routes
+                )
 
                 remaining_objective = {**objective, "remaining_from_index": i + 1}
                 regenerated, attempts = regenerate_with_feedback(
@@ -2108,11 +2154,25 @@ def run_stepwise(
                     error_context={"event": "navigation_boundary", "at_index": i},
                     max_attempts=max_retries_per_failure,
                     page=page,
+                    allowed_routes=allowed_routes,
                 )
                 total_retries += len(attempts)
                 _log("navigation.reanchored", {"index": i, "attempts": attempts})
-                if regenerated:
-                    queue = queue[: i + 1] + regenerated
+                if not regenerated:
+                    browser.close()
+                    return {
+                        "success": False,
+                        "final_outcome": _classify_final_outcome(
+                            success=False,
+                            failure_reason="navigation_reanchor_failed",
+                        ),
+                        "steps_succeeded": len(results),
+                        "steps_failed": 1,
+                        "failure_reason": "navigation_reanchor_failed",
+                        "results": results,
+                        "metrics": _build_metrics(results, len(initial_steps), total_retries),
+                    }
+                queue = queue[: i + 1] + regenerated
             i += 1
 
         browser.close()

@@ -69,6 +69,8 @@ def validate_step_against_dom(
     step: Dict[str, Any],
     dom_ctx: Dict[str, Any],
     page: Optional[Page] = None,
+    *,
+    allowed_routes: Optional[set] = None,
 ) -> Tuple[bool, str]:
     action = step.get("action")
     if action not in {"goto", "click", "screenshot", "assert_terminal"}:
@@ -91,7 +93,12 @@ def validate_step_against_dom(
         url = (step.get("url") or "").strip()
         if not url:
             return False, "missing_goto_url"
-        if url not in set(dom_ctx.get("routes") or []):
+        # Generation-time multi-route authority (crawl/real_routes) is valid for goto
+        # even when the live current-page extractor only lists local links.
+        routes = set(dom_ctx.get("routes") or [])
+        if allowed_routes:
+            routes |= {str(r).strip() for r in allowed_routes if str(r).strip()}
+        if url not in routes:
             return False, f"route_not_in_dom:{url}"
         return True, "ok"
 
