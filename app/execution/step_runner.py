@@ -2012,11 +2012,29 @@ def _execute_one(
         text = (step.get("label") or step.get("text") or "").strip()
         validation_condition = _extract_validation_condition(step)
         if selector:
-            page.locator(selector).first.click(timeout=8000)
+            loc = page.locator(selector)
+            try:
+                count = loc.count()
+            except Exception:
+                count = 0
+            if count == 0:
+                return False, shot_idx, f"selector_not_found_on_page:{selector}"
+            if count > 1:
+                return False, shot_idx, f"selector_not_unique:{selector}:count={count}"
+            loc.first.click(timeout=8000)
             _wait_for_playwright_validation(page, validation_condition)
             return True, shot_idx, None
         if text:
-            page.get_by_text(text, exact=True).first.click(timeout=8000)
+            loc = page.get_by_text(text, exact=True)
+            try:
+                count = loc.count()
+            except Exception:
+                count = 0
+            if count == 0:
+                return False, shot_idx, f"label_not_found_on_page:{text}"
+            if count > 1:
+                return False, shot_idx, f"label_not_unique:{text}:count={count}"
+            loc.first.click(timeout=8000)
             _wait_for_playwright_validation(page, validation_condition)
             return True, shot_idx, None
         return False, shot_idx, "missing_click_target"

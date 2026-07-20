@@ -60,18 +60,29 @@ async def _collect_candidates(page) -> List[Dict[str, Any]]:
 async def _click_by_text(page, text: str) -> bool:
     if not text:
         return False
-    # Prefer exact-ish text clicks via Playwright locators
+    # Prefer exact unique targets; never click ambiguous multi-match with .first
     for role in ("button", "link"):
         try:
-            loc = page.get_by_role(role, name=text, exact=False)
-            if await loc.count() > 0:
+            loc = page.get_by_role(role, name=text, exact=True)
+            count = await loc.count()
+            if count == 1:
                 await loc.first.click(timeout=4000)
                 return True
         except Exception:
             pass
     try:
+        loc = page.get_by_text(text, exact=True)
+        count = await loc.count()
+        if count == 1:
+            await loc.first.click(timeout=4000)
+            return True
+    except Exception:
+        pass
+    # Single fuzzy match only when exact unique fails
+    try:
         loc = page.get_by_text(text, exact=False)
-        if await loc.count() > 0:
+        count = await loc.count()
+        if count == 1:
             await loc.first.click(timeout=4000)
             return True
     except Exception:

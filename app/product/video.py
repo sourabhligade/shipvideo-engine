@@ -190,11 +190,18 @@ def render_journey_video(
             step.duration_sec = seconds_per_frame
         cues = build_subtitles(steps, seconds_per_frame=seconds_per_frame)
 
-    # Drive frame hold times from cue spans (speech-aligned), then enforce 60s cap.
+    # Drive frame hold times from cue timeline so silence between lines is kept
+    # (end-start alone undercounts and desyncs slideshow vs narration).
+    audio_total = float(audio_pack.get("audio_duration_sec") or 0.0)
     frame_durations: List[float] = []
     for i, step in enumerate(steps_with_shots):
         if i < len(cues):
-            dur = max(0.05, float(cues[i]["end"]) - float(cues[i]["start"]))
+            start = float(cues[i]["start"])
+            if i + 1 < len(cues):
+                dur = max(0.05, float(cues[i + 1]["start"]) - start)
+            else:
+                end = audio_total if audio_total > start else float(cues[i]["end"])
+                dur = max(0.05, end - start)
         else:
             dur = seconds_per_frame
         frame_durations.append(dur)
@@ -298,7 +305,7 @@ def render_journey_video(
             str(silent_mp4),
         ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg slideshow failed: {result.stderr or result.stdout}")
 
@@ -318,9 +325,12 @@ def render_journey_video(
             ],
             capture_output=True,
             text=True,
+            timeout=120,
         )
         if mux.returncode != 0:
-            output_mp4.write_bytes(silent_mp4.read_bytes())
+            raise RuntimeError(
+                f"ffmpeg mux failed: {(mux.stderr or mux.stdout or '').strip()}"
+            )
     else:
         output_mp4.write_bytes(silent_mp4.read_bytes())
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -114,11 +115,18 @@ def run_script(
             ns["context"] = context
 
             try:
+                page.set_default_timeout(min(max(int(timeout_seconds), 1), 600) * 1000)
                 page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
-                _log("script_runner.started", {"base_url": base_url})
+                _log("script_runner.started", {"base_url": base_url, "timeout_seconds": timeout_seconds})
 
-
-                run_demo(page, context)
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    fut = pool.submit(run_demo, page, context)
+                    try:
+                        fut.result(timeout=max(int(timeout_seconds), 1))
+                    except FuturesTimeout:
+                        raise TimeoutError(
+                            f"script run_demo exceeded timeout_seconds={timeout_seconds}"
+                        )
 
                 success = True
                 _log("script_runner.completed", {"success": True})
