@@ -193,6 +193,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     commit_sha: str = ""
     start_route: str | None = None
     force: bool = False
+    comment_triggered: bool = False
     diff_files: list[dict[str, str]] | None = None
 
 
@@ -281,6 +282,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
             return {"status": "ignored"}
 
         force = bool(parsed.get("force", False))
+        comment_triggered = True
         start_route = parsed.get("route")
 
 
@@ -338,8 +340,27 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         staging_url=staging_url,
                         diff_files=diff_files,
                         start_route=start_route,
+                        force=force,
+                        comment_triggered=comment_triggered,
                     )
                 )
+
+                if flow.get("skipped"):
+                    skip_reason = str(flow.get("reason") or "Demo generation skipped.")
+                    print(
+                        f"[webhook] analyze_pr skipped reason={skip_reason!r}",
+                        flush=True,
+                    )
+                    if skip_comment:
+                        comment_on_pr(
+                            repo_full_name,
+                            pr_number,
+                            None,
+                            error_message=(
+                                f"**Demo not generated**\n\n{skip_reason}"
+                            ),
+                        )
+                    return
 
                 steps = flow.get("steps") or [{"action": "screenshot"}]
                 generation_context = flow.get("generation_context")

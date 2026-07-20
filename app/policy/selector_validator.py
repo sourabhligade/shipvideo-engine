@@ -71,8 +71,21 @@ def validate_step_against_dom(
     page: Optional[Page] = None,
 ) -> Tuple[bool, str]:
     action = step.get("action")
-    if action not in {"goto", "click", "screenshot"}:
+    if action not in {"goto", "click", "screenshot", "assert_terminal"}:
         return False, f"invalid_action:{action}"
+
+    if action == "assert_terminal":
+        condition = step.get("condition") if isinstance(step.get("condition"), dict) else {}
+        has_expected = bool(
+            (step.get("expected_element") or "").strip()
+            or (step.get("expected_text") or "").strip()
+            or (step.get("expected_url") or "").strip()
+            or (condition.get("value") or "").strip()
+            or (condition.get("type") or "").strip()
+        )
+        if not has_expected:
+            return False, "missing_terminal_condition"
+        return True, "ok:assert_terminal"
 
     if action == "goto":
         url = (step.get("url") or "").strip()

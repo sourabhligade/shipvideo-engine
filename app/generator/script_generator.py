@@ -4,6 +4,8 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
+from app.llm_guards import record_spend
+
 try:
     from openai import OpenAI, BadRequestError                
 except Exception:
@@ -11,6 +13,15 @@ except Exception:
     BadRequestError = Exception                
 
 MAX_SCRIPT_RETRIES = 2
+
+
+def _usage_tokens(completion: Any) -> tuple[int, int]:
+    usage = getattr(completion, "usage", None)
+    if usage is None:
+        return 0, 0
+    pt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    ct = int(getattr(usage, "completion_tokens", 0) or 0)
+    return pt, ct
 
 _SCRIPT_JSON_SCHEMA: Dict[str, Any] = {
     "name": "playwright_script",
@@ -56,6 +67,20 @@ def _get_client() -> Any:
     return OpenAI(base_url=base_url, api_key=key)
 
 
+def _parse_script_payload(content: str, completion: Any) -> str:
+    text = (content or "{}").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        text = text[start : end + 1]
+    data = json.loads(text or "{}")
+    pt, ct = _usage_tokens(completion)
+    record_spend(pt, ct)
+    script = (data.get("script") or "").strip()
+    if not script:
+        raise RuntimeError("generate_playwright_script: LLM returned empty script")
+    return script
+
+
 def _call_llm(client: Any, deployment: str, messages: List[Dict[str, str]]) -> str:
     try:
         completion = client.chat.completions.create(
@@ -64,9 +89,12 @@ def _call_llm(client: Any, deployment: str, messages: List[Dict[str, str]]) -> s
             max_completion_tokens=1500,
             response_format={"type": "json_schema", "json_schema": _SCRIPT_JSON_SCHEMA},
         )
-        data = json.loads(completion.choices[0].message.content or "{}")
-        return data.get("script") or ""
-    except (BadRequestError, Exception) as e:
+        return _parse_script_payload(completion.choices[0].message.content or "{}", completion)
+    except RuntimeError:
+        raise
+    except BadRequestError:
+        pass
+    except Exception as e:
         err_str = str(e).lower()
         is_format_err = any(
             kw in err_str
@@ -75,19 +103,13 @@ def _call_llm(client: Any, deployment: str, messages: List[Dict[str, str]]) -> s
         if not is_format_err:
             raise
 
-
     completion = client.chat.completions.create(
         model=deployment,
         messages=messages,
         max_completion_tokens=1500,
         response_format={"type": "json_object"},
     )
-    content = (completion.choices[0].message.content or "{}").strip()
-    start, end = content.find("{"), content.rfind("}")
-    if start != -1 and end > start:
-        content = content[start : end + 1]
-    data = json.loads(content)
-    return data.get("script") or ""
+    return _parse_script_payload(completion.choices[0].message.content or "{}", completion)
 
 
 def _build_action_menu(dom_data: Dict[str, Any]) -> Dict[str, Any]:

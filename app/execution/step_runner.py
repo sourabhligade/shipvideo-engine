@@ -1832,6 +1832,68 @@ def _assert_ab_terminal_condition(
     return result
 
 
+def _assert_playwright_terminal_condition(page: Page, step: Dict[str, Any]) -> tuple[bool, str]:
+    condition = step.get("condition") if isinstance(step.get("condition"), dict) else {}
+    cond_type = str(condition.get("type") or "").strip()
+    cond_value = str(condition.get("value") or "").strip()
+    expected_element = (
+        str(step.get("expected_element") or "").strip()
+        or cond_value
+    )
+    expected_text = str(step.get("expected_text") or "").strip()
+    expected_url = str(step.get("expected_url") or "").strip()
+
+    if not cond_type:
+        if expected_url:
+            cond_type = "url_match"
+            cond_value = expected_url
+        elif expected_text:
+            cond_type = "text_present"
+            cond_value = expected_text
+        elif expected_element:
+            cond_type = "element_present"
+            cond_value = expected_element
+
+    if cond_type == "url_match" and (cond_value or expected_url):
+        needle = cond_value or expected_url
+        try:
+            page.wait_for_url(f"**{needle}**", timeout=8000)
+            return True, "url_match"
+        except Exception:
+            current = ""
+            try:
+                current = page.url or ""
+            except Exception:
+                pass
+            if needle in current:
+                return True, "url_match"
+            return False, f"terminal_url_not_matched:{needle}"
+
+    if cond_type == "text_present" and (cond_value or expected_text):
+        needle = cond_value or expected_text
+        try:
+            page.get_by_text(needle, exact=False).first.wait_for(state="visible", timeout=8000)
+            return True, "text_present"
+        except Exception:
+            return False, f"terminal_text_not_found:{needle}"
+
+    if expected_element or (cond_type == "element_present" and cond_value):
+        needle = expected_element or cond_value
+        for selector in (f"[data-testid='{needle}']", f"#{needle}", needle):
+            try:
+                page.locator(selector).first.wait_for(state="visible", timeout=4000)
+                return True, "element_present"
+            except Exception:
+                pass
+        try:
+            page.get_by_text(needle, exact=False).first.wait_for(state="visible", timeout=4000)
+            return True, "element_present_text"
+        except Exception:
+            return False, f"terminal_element_not_found:{needle}"
+
+    return False, "missing_terminal_condition"
+
+
 def _execute_one(
     page: Page,
     base_url: str,
@@ -1862,6 +1924,11 @@ def _execute_one(
         path = out_dir / f"shot{shot_idx}.png"
         page.screenshot(path=str(path), full_page=full_page)
         return True, shot_idx + 1, None
+    if action == "assert_terminal":
+        ok, reason = _assert_playwright_terminal_condition(page, step)
+        if ok:
+            return True, shot_idx, None
+        return False, shot_idx, reason or "terminal_not_reached"
     return False, shot_idx, f"unknown_action:{action}"
 
 
@@ -1906,7 +1973,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)           
                 _log("step.regenerated_on_validation_failure", {"index": i, "reason": reason, "attempts": attempts})
                 if not regenerated:
                     browser.close()
@@ -1935,7 +2002,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)           
                 _log("step.regenerated_on_execution_failure", {"index": i, "error": err, "attempts": attempts})
                 if not regenerated:
                     browser.close()
@@ -1956,10 +2023,14 @@ def run_stepwise(
 
             _step_latency_ms = int((time.monotonic() - _step_t0) * 1000)           
             step_result = {"index": i, "step": step, "status": "ok", "step_latency_ms": _step_latency_ms}
-            if str(step.get("action") or "") == "screenshot":
+            action_name = str(step.get("action") or "")
+            if action_name == "screenshot":
                 shot_path = screenshot_dir / f"shot{shot_idx - 1}.png"
                 step_result["screenshot_path"] = str(shot_path)
                 step_result["outcome"] = "success"
+            elif action_name == "assert_terminal":
+                step_result["outcome"] = "success"
+                step_result["terminal_condition_reached"] = True
             results.append(step_result)
 
             now = capture_state(page)
@@ -1976,7 +2047,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)
                 _log("navigation.reanchored", {"index": i, "attempts": attempts})
                 if regenerated:
                     queue = queue[: i + 1] + regenerated
