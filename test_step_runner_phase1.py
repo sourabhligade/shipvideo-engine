@@ -34,6 +34,7 @@ from app.execution.step_runner import (
     _ensure_ab_target_actionable,
     _configure_ab_session,
     _resolve_ab_click_target,
+    _resolve_terminal_expectation,
     _scroll_to_find,
     _should_keep_click_screenshots,
     _settle_ab_page,
@@ -137,6 +138,18 @@ class _FakeCLI:
     def network_requests(self):
         self.calls.append(("network_requests",))
         return list(self.network_entries)
+
+    def get_count(self, selector):
+        self.calls.append(("get_count", selector))
+        return 1 if self.found_testid_ref or self.found_ref else 0
+
+    def get_url(self):
+        self.calls.append(("get_url",))
+        return getattr(self, "current_url", "https://example.com/done")
+
+    def find_element(self, selector):
+        self.calls.append(("find_element", selector))
+        return ""
 
 
 class StepRunnerPhase1Tests(unittest.TestCase):
@@ -652,7 +665,14 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         )
 
         self.assertTrue(result["found"])
-        self.assertIn(result["source"], {"find_testid", "wait_for_element_present"})
+        self.assertIn(
+            result["source"],
+            {
+                "find_testid",
+                "find_testid_visible",
+                "wait_for_element_present",
+            },
+        )
         self.assertIn(result["actual"], {"@e99", "security-flow-modal"})
         self.assertIn(("find_testid_ref", "security-flow-modal"), cli.calls)
 
@@ -697,6 +717,81 @@ class StepRunnerPhase1Tests(unittest.TestCase):
             },
         )
 
+
+
+    def test_assert_terminal_empty_defaults_to_not_found(self):
+        cli = _FakeCLI()
+        result = _assert_ab_terminal_condition(
+            cli,
+            condition={},
+            expected_element="",
+            extract_snapshot=lambda **kwargs: {
+                "interactive_elements": [],
+                "context_elements": [],
+                "snapshot_text": "",
+            },
+        )
+        self.assertFalse(result["found"])
+        self.assertEqual(result["source"], "missing_terminal_condition")
+
+    def test_resolve_terminal_expectation_from_expected_url(self):
+        condition, expected = _resolve_terminal_expectation(
+            {"action": "assert_terminal", "expected_url": "/settings"}
+        )
+        self.assertEqual(condition["type"], "url_match")
+        self.assertEqual(condition["value"], "/settings")
+
+    def test_resolve_terminal_expectation_from_expected_text(self):
+        condition, expected = _resolve_terminal_expectation(
+            {"action": "assert_terminal", "expected_text": "Success"}
+        )
+        self.assertEqual(condition["type"], "text_present")
+        self.assertEqual(condition["value"], "Success")
+
+    def test_assert_terminal_url_match_success(self):
+        cli = _FakeCLI()
+        cli.current_url = "https://app.example.com/settings"
+        condition, expected = _resolve_terminal_expectation(
+            {"action": "assert_terminal", "expected_url": "/settings"}
+        )
+        result = _assert_ab_terminal_condition(
+            cli,
+            condition=condition,
+            expected_element=expected,
+            extract_snapshot=lambda **kwargs: {},
+        )
+        self.assertTrue(result["found"])
+        self.assertIn(result["source"], {"wait_for_url", "url_match_substring"})
+
+    def test_assert_terminal_text_fail_is_not_success(self):
+        cli = _FakeCLI(fail_text=True)
+        condition, expected = _resolve_terminal_expectation(
+            {"action": "assert_terminal", "expected_text": "Missing"}
+        )
+        result = _assert_ab_terminal_condition(
+            cli,
+            condition=condition,
+            expected_element=expected,
+            extract_snapshot=lambda **kwargs: {},
+        )
+        self.assertFalse(result["found"])
+        self.assertEqual(result["source"], "text_present_failed")
+
+    def test_assert_terminal_expected_url_without_element_does_not_auto_pass(self):
+        """Regression: empty expected_element must not leave found=True."""
+        condition, expected = _resolve_terminal_expectation(
+            {"action": "assert_terminal", "expected_url": "/done"}
+        )
+        self.assertEqual(condition["type"], "url_match")
+        cli = _FakeCLI(fail_url=True)
+        cli.current_url = "https://example.com/other"
+        result = _assert_ab_terminal_condition(
+            cli,
+            condition=condition,
+            expected_element=expected,
+            extract_snapshot=lambda **kwargs: {},
+        )
+        self.assertFalse(result["found"])
 
 if __name__ == "__main__":
     unittest.main()
