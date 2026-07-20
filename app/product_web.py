@@ -6,6 +6,7 @@ Open-source stack: FastAPI, Playwright, FFmpeg, vanilla HTML/CSS/JS.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -23,7 +24,22 @@ STATIC_DIR = WEB_DIR / "static"
 TEMPLATES_DIR = WEB_DIR / "templates"
 DATA_JOBS = REPO_ROOT / "data" / "jobs"
 
-app = FastAPI(title="ShipVideo", description="Link → journey video with subtitles")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    try:
+        init_tracing()
+    except Exception:
+        pass
+    DATA_JOBS.mkdir(parents=True, exist_ok=True)
+    yield
+
+
+app = FastAPI(
+    title="ShipVideo",
+    description="Link → journey video with subtitles",
+    lifespan=_lifespan,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,19 +52,10 @@ if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-    try:
-        init_tracing()
-    except Exception:
-        pass
-    DATA_JOBS.mkdir(parents=True, exist_ok=True)
-
-
 class CreateJobBody(BaseModel):
     url: str = Field(..., min_length=3, max_length=2000)
     max_steps: int = Field(default=10, ge=3, le=20)
-    use_azure_subtitles: bool = Field(default=True)
+    use_azure_subtitles: bool = Field(default=False)
 
 
 @app.get("/", response_class=HTMLResponse)
