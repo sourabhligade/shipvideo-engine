@@ -17,14 +17,18 @@ from app.preview_url_resolver import get_preview_url, wait_for_preview_ready
 from app.config import load_config
 import time
 from observability import init_tracing, pipeline_run_span, print_pipeline_summary, set_current_span_error
+from contextlib import asynccontextmanager
+
 from github import Github
 
-app = FastAPI()
 
-
-@app.on_event("startup")
-def on_startup():
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
     init_tracing()
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 
 
 from fastapi.middleware.cors import CORSMiddleware

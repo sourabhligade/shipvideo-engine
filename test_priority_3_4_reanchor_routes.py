@@ -113,7 +113,8 @@ class Priority3ReanchorFailTests(unittest.TestCase):
              patch.object(sr, "detect_major_change", return_value=True), \
              patch.object(sr, "_execute_one", return_value=(True, 1, None)), \
              patch.object(sr, "validate_step_against_dom", return_value=(True, "ok")), \
-             patch.object(sr, "regenerate_with_feedback", return_value=([], [{"attempt": 1, "status": "empty_steps"}])):
+             patch.object(sr, "regenerate_with_feedback", return_value=([], [{"attempt": 1, "status": "empty_steps"}])), \
+             patch.object(sr, "_log", lambda *a, **k: None):
             result = sr.run_stepwise(
                 preview_url="https://example.com",
                 initial_steps=[{"action": "click", "label": "Go"}],
