@@ -257,6 +257,8 @@ class Scenario3_ReanchorHardFail(unittest.TestCase):
                 sr,
                 "regenerate_with_feedback",
                 return_value=([], [{"attempt": 1, "status": "empty_steps"}]),
+            ), patch.object(
+                sr, "_log", lambda *a, **k: None
             ):
                 result = sr.run_stepwise(
                     preview_url="https://example.com",

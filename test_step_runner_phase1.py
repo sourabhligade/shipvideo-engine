@@ -153,6 +153,12 @@ class _FakeCLI:
 
 
 class StepRunnerPhase1Tests(unittest.TestCase):
+    def setUp(self):
+        # Silence expected selection-miss diagnostics during unit tests
+        self._ref_log = patch("app.browser.ref_selector._log_result", lambda *a, **k: None)
+        self._ref_log.start()
+        self.addCleanup(self._ref_log.stop)
+
     def test_configure_ab_session_sets_capture_viewport(self):
         cli = _FakeCLI()
         settings = CaptureSettings(viewport_width=1440, viewport_height=900)
