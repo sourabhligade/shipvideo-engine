@@ -1882,7 +1882,16 @@ def run_stepwise(
     results: List[Dict[str, Any]] = []
     queue: List[Dict[str, Any]] = list(initial_steps)
     shot_idx = 1
-    total_retries = 0                                                  
+    total_retries = 0
+    gen_ctx = _get_generation_context(objective)
+    allowed_routes: List[str] = []
+    for r in gen_ctx.get("real_routes") or []:
+        s = str(r or "").strip()
+        if s:
+            allowed_routes.append(s)
+    start_r = str(gen_ctx.get("start_route") or "").strip()
+    if start_r:
+        allowed_routes.append(start_r)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -1894,9 +1903,11 @@ def run_stepwise(
         i = 0
         while i < len(queue):
             step = queue[i]
-            _step_t0 = time.monotonic()                                  
+            _step_t0 = time.monotonic()
 
-            ok, reason = validate_step_against_dom(step, dom_ctx, page=page)
+            ok, reason = validate_step_against_dom(
+                step, dom_ctx, page=page, allowed_routes=allowed_routes or None
+            )
             if not ok:
 
                 regenerated, attempts = regenerate_with_feedback(
@@ -1906,7 +1917,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)
                 _log("step.regenerated_on_validation_failure", {"index": i, "reason": reason, "attempts": attempts})
                 if not regenerated:
                     browser.close()
@@ -1935,7 +1946,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)
                 _log("step.regenerated_on_execution_failure", {"index": i, "error": err, "attempts": attempts})
                 if not regenerated:
                     browser.close()
@@ -1954,7 +1965,7 @@ def run_stepwise(
                 queue[i : i + 1] = regenerated
                 continue
 
-            _step_latency_ms = int((time.monotonic() - _step_t0) * 1000)           
+            _step_latency_ms = int((time.monotonic() - _step_t0) * 1000)
             step_result = {"index": i, "step": step, "status": "ok", "step_latency_ms": _step_latency_ms}
             if str(step.get("action") or "") == "screenshot":
                 shot_path = screenshot_dir / f"shot{shot_idx - 1}.png"
@@ -1976,7 +1987,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)
                 _log("navigation.reanchored", {"index": i, "attempts": attempts})
                 if regenerated:
                     queue = queue[: i + 1] + regenerated

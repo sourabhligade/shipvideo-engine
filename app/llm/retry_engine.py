@@ -8,6 +8,22 @@ from app.llm.step_generator import generate_next_steps, generate_single_step_tow
 from app.policy.selector_validator import validate_step_against_dom
 
 
+def _allowed_routes_from_objective(objective: Dict[str, Any]) -> Optional[List[str]]:
+    gen = objective.get("generation_context") if isinstance(objective, dict) else None
+    if not isinstance(gen, dict):
+        return None
+    routes: List[str] = []
+    for key in ("real_routes", "start_route_candidates"):
+        for r in gen.get(key) or []:
+            s = str(r or "").strip()
+            if s:
+                routes.append(s)
+    start = str(gen.get("start_route") or "").strip()
+    if start:
+        routes.append(start)
+    return routes or None
+
+
 def regenerate_with_feedback(
     *,
     objective: Dict[str, Any],
@@ -18,6 +34,7 @@ def regenerate_with_feedback(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     attempts: List[Dict[str, Any]] = []
     previous_error = error_context
+    allowed_routes = _allowed_routes_from_objective(objective)
 
     for i in range(1, max_attempts + 1):
         try:
@@ -39,7 +56,9 @@ def regenerate_with_feedback(
         ok_all = True
         reasons: List[str] = []
         for s in steps:
-            ok, reason = validate_step_against_dom(s, dom_context, page=page)
+            ok, reason = validate_step_against_dom(
+                s, dom_context, page=page, allowed_routes=allowed_routes
+            )
             if not ok:
                 ok_all = False
                 reasons.append(reason)
@@ -62,6 +81,7 @@ def regenerate_single_step_toward_testid(
 ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     attempts: List[Dict[str, Any]] = []
     previous_error: Dict[str, Any] = {}
+    allowed_routes = _allowed_routes_from_objective(objective)
 
     for i in range(1, max_attempts + 1):
         try:
@@ -75,7 +95,9 @@ def regenerate_single_step_toward_testid(
             attempts.append({"attempt": i, "status": "generation_error", "error": str(e)})
             previous_error = {"error": str(e)}
             continue
-        ok, reason = validate_step_against_dom(step, dom_context, page=page)
+        ok, reason = validate_step_against_dom(
+            step, dom_context, page=page, allowed_routes=allowed_routes
+        )
         attempts.append({"attempt": i, "status": "ok" if ok else "rejected", "reason": reason})
         if ok:
             return step, attempts

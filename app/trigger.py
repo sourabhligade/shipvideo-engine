@@ -116,11 +116,17 @@ def evaluate_trigger(
     threshold: int = int(trigger_cfg.get("threshold") or 5)
     comment_cmd: str = trigger_cfg.get("commentCommand") or "/demo"
 
+    matched = [f for f in diff_files if is_ui_file(f.get("path") or "")]
+    matched_paths = [f.get("path", "") for f in matched]
+
     if force:
+        # No UI-specific grounding available → homepage-only crawl.
+        general_demo = len(matched) == 0
         return TriggerDecision(
             should_run=True,
             reason="Force flag set; skipping all file filters.",
-            matched_files=[f.get("path", "") for f in diff_files],
+            matched_files=matched_paths or [f.get("path", "") for f in diff_files],
+            general_demo=general_demo,
         )
 
     if mode == "on-demand":
@@ -130,8 +136,6 @@ def evaluate_trigger(
                 f"on-demand mode: comment `{comment_cmd}` on this PR to generate a demo."
             ),
         )
-
-    matched = [f for f in diff_files if is_ui_file(f.get("path") or "")]
 
     if not matched:
         return TriggerDecision(
@@ -151,11 +155,11 @@ def evaluate_trigger(
                     f"Changes below smart threshold ({magnitude}/{threshold} lines changed). "
                     f"Comment `{comment_cmd} --force` to generate a demo anyway."
                 ),
-                matched_files=[f.get("path", "") for f in matched],
+                matched_files=matched_paths,
             )
 
     return TriggerDecision(
         should_run=True,
         reason=f"{len(matched)} UI file(s) changed.",
-        matched_files=[f.get("path", "") for f in matched],
+        matched_files=matched_paths,
     )

@@ -338,6 +338,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         staging_url=staging_url,
                         diff_files=diff_files,
                         start_route=start_route,
+                        force=force,
                     )
                 )
 

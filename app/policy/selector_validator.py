@@ -69,6 +69,7 @@ def validate_step_against_dom(
     step: Dict[str, Any],
     dom_ctx: Dict[str, Any],
     page: Optional[Page] = None,
+    allowed_routes: Optional[List[str]] = None,
 ) -> Tuple[bool, str]:
     action = step.get("action")
     if action not in {"goto", "click", "screenshot"}:
@@ -78,7 +79,9 @@ def validate_step_against_dom(
         url = (step.get("url") or "").strip()
         if not url:
             return False, "missing_goto_url"
-        if url not in set(dom_ctx.get("routes") or []):
+        page_routes = set(dom_ctx.get("routes") or [])
+        gen_routes = set(allowed_routes or [])
+        if url not in page_routes and url not in gen_routes:
             return False, f"route_not_in_dom:{url}"
         return True, "ok"
 
@@ -100,8 +103,11 @@ def validate_step_against_dom(
 
 
             if page is not None:
-                if _selector_count_on_page(page, selector) == 0:
+                count = _selector_count_on_page(page, selector)
+                if count == 0:
                     return False, f"selector_not_found_on_page:{selector}"
+                if count > 1:
+                    return False, f"selector_ambiguous:{selector}:count={count}"
 
             if is_testid:
                 return True, "ok:testid"
@@ -123,6 +129,8 @@ def validate_step_against_dom(
                     live_count = 0
                 if live_count == 0:
                     return False, f"label_not_found_on_page:{label}"
+                if live_count > 1:
+                    return False, f"label_ambiguous:{label}:count={live_count}"
                 return True, "ok:label_live"
 
 
