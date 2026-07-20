@@ -24,7 +24,10 @@ from github import Github
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    init_tracing()
+    try:
+        init_tracing()
+    except Exception as e:
+        print(f"[webhook] init_tracing failed (non-fatal): {type(e).__name__}: {e}", flush=True)
     yield
 
 
