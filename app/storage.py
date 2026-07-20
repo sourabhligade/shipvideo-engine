@@ -114,7 +114,7 @@ def check_storage_usage() -> Tuple[int, float]:
             try:
                 obj = s3_client.head_object(Bucket=bucket_name, Key=key)
                 total_size += obj.get("ContentLength", 0) / (1024 * 1024)      
-            except:
+            except Exception:
                 pass
 
         return len(videos), total_size

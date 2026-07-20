@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.sync_api import Page
@@ -28,7 +29,7 @@ def regenerate_with_feedback(
                 previous_error=previous_error,
                 max_steps=2,
             )
-        except RuntimeError as e:
+        except (RuntimeError, json.JSONDecodeError, ValueError, TypeError, KeyError) as e:
             attempts.append({"attempt": i, "status": "generation_error", "error": str(e)})
             previous_error = {"error": str(e)}
             continue
@@ -75,7 +76,7 @@ def regenerate_single_step_toward_testid(
                 objective=objective,
                 previous_error=previous_error,
             )
-        except RuntimeError as e:
+        except (RuntimeError, json.JSONDecodeError, ValueError, TypeError, KeyError) as e:
             attempts.append({"attempt": i, "status": "generation_error", "error": str(e)})
             previous_error = {"error": str(e)}
             continue

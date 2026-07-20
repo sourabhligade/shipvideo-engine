@@ -95,6 +95,7 @@ def render_video(
         cmd,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     if result.returncode != 0 and result.stderr:
         print(f"[render] ffmpeg stderr: {result.stderr.strip()}", flush=True)

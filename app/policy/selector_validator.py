@@ -120,8 +120,11 @@ def validate_step_against_dom(
 
 
             if page is not None:
-                if _selector_count_on_page(page, selector) == 0:
+                count = _selector_count_on_page(page, selector)
+                if count == 0:
                     return False, f"selector_not_found_on_page:{selector}"
+                if count > 1:
+                    return False, f"selector_not_unique:{selector}:count={count}"
 
             if is_testid:
                 return True, "ok:testid"
@@ -143,6 +146,8 @@ def validate_step_against_dom(
                     live_count = 0
                 if live_count == 0:
                     return False, f"label_not_found_on_page:{label}"
+                if live_count > 1:
+                    return False, f"label_not_unique:{label}:count={live_count}"
                 return True, "ok:label_live"
 
 

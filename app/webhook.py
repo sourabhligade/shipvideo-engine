@@ -229,39 +229,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 )
             return {"status": "skipped"}
 
-        if trigger_mode == "smart" and not force:
-
-
-            diff_files = fetch_pr_diff(repo_full_name, pr_number)
-            changed_lines = 0
-            for f in diff_files:
-                if _is_ui_path(f.get("path", ""), include_prefixes=include_prefixes, exclude_substrings=exclude_substrings):
-                    changed_lines += _count_patch_changed_lines(f.get("patch", ""))
-
-            if changed_lines < threshold:
-                print(
-                    f"[webhook] smart-skip changed_lines={changed_lines} threshold={threshold} "
-                    f"mode={trigger_mode} repo={repo_full_name} pr={pr_number}",
-                    flush=True,
-                )
-                if skip_comment:
-                    comment_on_pr(
-                        repo_full_name,
-                        pr_number,
-                        None,
-                        error_message=(
-                            f"**Demo not generated**\n\n"
-                            f"Smart mode skipped this run: UI changed lines={changed_lines} < threshold={threshold}.\n\n"
-                            f"Comment `{comment_command} --force` to override."
-                        ),
-                    )
-                return {"status": "skipped"}
-            else:
-                print(
-                    f"[webhook] smart-run changed_lines={changed_lines} threshold={threshold} "
-                    f"mode={trigger_mode} repo={repo_full_name} pr={pr_number}",
-                    flush=True,
-                )
+        # Smart/auto filtering is owned by evaluate_trigger (analyze_pr).
 
 
     else:
@@ -306,7 +274,6 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 if check_already_ran(repo_full_name, pr_number, commit_sha):
                     print("[llm-guards] skipping duplicate run", flush=True)
                     return
-                record_run(repo_full_name, pr_number, commit_sha)
 
                 delay = config.get("deployment_delay_seconds", 0)
                 if delay > 0:
@@ -430,6 +397,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                     if budget_exceeded:
                         extra_note = "**Monthly budget limit reached.** This demo used fallback steps (no LLM)."
                     comment_on_pr(repo_full_name, pr_number, video_url, extra_note=extra_note)
+                    record_run(repo_full_name, pr_number, commit_sha)
                 except Exception as e:
 
                     err_text = f"{type(e).__name__}: {e}"

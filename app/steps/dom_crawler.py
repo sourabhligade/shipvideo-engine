@@ -133,6 +133,7 @@ async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
             text: (e.innerText || e.value || "").trim().slice(0, 80),
             testid: e.getAttribute('data-testid') || "",
             aria: e.getAttribute('aria-label') || "",
+            title: e.getAttribute('title') || "",
             id: e.id || "",
             classes: e.className || ""
         }))""",
@@ -176,7 +177,7 @@ async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
             "text":     meta.get("text", ""),
             "testid":   meta.get("testid", ""),
             "aria":     meta.get("aria", ""),
-            "title":    "",                                                              
+            "title":    meta.get("title", "") or "",
             "id":       meta.get("id", ""),
             "role":     "button",
             "selector": _short_selector(meta, "button"),
@@ -266,8 +267,22 @@ def _merge_snapshots(route_snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, An
                 merged_links.append(link)
 
         for inp in (ui.get("inputs") or []):
-            key = (inp.get("name") or "") + "|" + (inp.get("placeholder") or "")
-            key = key.strip("|")
+            testid = (inp.get("testid") or "").strip()
+            aria = (inp.get("aria") or "").strip()
+            el_id = (inp.get("id") or "").strip()
+            input_type = (inp.get("input_type") or inp.get("type") or "").strip()
+            name = (inp.get("name") or "").strip()
+            placeholder = (inp.get("placeholder") or "").strip()
+            if testid:
+                key = f"testid:{testid}"
+            elif name or placeholder:
+                key = f"nameph:{name}|{placeholder}"
+            elif aria:
+                key = f"aria:{aria}|{input_type}"
+            elif el_id:
+                key = f"id:{el_id}"
+            else:
+                key = f"anon:{input_type}|{len(merged_inputs)}"
             if key and key not in seen_inp:
                 seen_inp.add(key)
                 merged_inputs.append(inp)

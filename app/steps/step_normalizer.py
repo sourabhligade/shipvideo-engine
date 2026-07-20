@@ -139,6 +139,9 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _extract_routes_from_diff(diff_files: List[Dict[str, str]]) -> Set[str]:
     routes: Set[str] = set()
     for f in diff_files:
+        status = str(f.get("status") or "").lower()
+        if status in {"removed", "deleted"}:
+            continue
         path = f.get("path", "")
 
 

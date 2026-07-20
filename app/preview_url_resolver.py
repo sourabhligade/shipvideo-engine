@@ -61,24 +61,30 @@ def wait_for_preview_ready(
     except Exception:
         ssl_context = None
 
+    def _probe(method: str) -> bool:
+        req = urllib.request.Request(url, method=method)
+        req.add_header("User-Agent", "ShipVideo-Engine/1.0")
+        if method == "GET":
+            req.add_header("Range", "bytes=0-0")
+        open_kwargs = {"timeout": 15}
+        if ssl_context is not None:
+            open_kwargs["context"] = ssl_context
+        with urllib.request.urlopen(req, **open_kwargs) as resp:
+            return 200 <= int(getattr(resp, "status", 0) or 0) < 400
+
     while time.monotonic() < deadline:
-        try:
-            req = urllib.request.Request(url, method="HEAD")
-            req.add_header("User-Agent", "ShipVideo-Engine/1.0")
-            if ssl_context is not None:
-                with urllib.request.urlopen(req, timeout=15, context=ssl_context) as resp:
-                    if 200 <= resp.status < 400:
-                        print(f"[preview] ready url={url}", flush=True)
-                        return True
-            else:
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    if 200 <= resp.status < 400:
-                        print(f"[preview] ready url={url}", flush=True)
-                        return True
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-            if time.monotonic() >= next_log:
-                print(f"[preview] waiting for ready error={e!r}", flush=True)
-                next_log = time.monotonic() + 30
+        last_err = None
+        for method in ("GET", "HEAD"):
+            try:
+                if _probe(method):
+                    print(f"[preview] ready method={method} url={url}", flush=True)
+                    return True
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
+                last_err = e
+                continue
+        if last_err is not None and time.monotonic() >= next_log:
+            print(f"[preview] waiting for ready error={last_err!r}", flush=True)
+            next_log = time.monotonic() + 30
         time.sleep(interval)
 
     print(f"[preview] not ready after timeout={timeout}s url={url}", flush=True)

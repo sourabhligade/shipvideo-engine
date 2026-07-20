@@ -147,6 +147,7 @@ def build_narration_audio(
         check=False,
         capture_output=True,
         text=True,
+        timeout=120,
     )
 
     concat_list = work_dir / f"{stem}_concat.txt"
@@ -174,6 +175,7 @@ def build_narration_audio(
         ],
         capture_output=True,
         text=True,
+        timeout=120,
     )
     if proc.returncode != 0:
         # re-encode fallback
@@ -186,6 +188,7 @@ def build_narration_audio(
             ],
             capture_output=True,
             text=True,
+            timeout=120,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"concat narration failed: {proc.stderr}")
@@ -217,6 +220,7 @@ def build_narration_audio(
             check=True,
             capture_output=True,
             text=True,
+            timeout=120,
         )
         combined = sped
         # scale spans
@@ -357,28 +361,56 @@ def align_texts_to_speech_segments(
             for i in range(n)
         ]
 
-    # If more speech chunks than texts, merge consecutive speech into n buckets by duration weight
-    if len(segs) >= n:
-        # Greedy: assign each segment to current line until proportional duration filled
+    # Prefer 1:1 when speech segment count matches subtitle lines.
+    if len(segs) == n:
+        return [
+            {
+                "index": i + 1,
+                "start": float(segs[i]["start"]),
+                "end": max(float(segs[i]["end"]), float(segs[i]["start"]) + 0.05),
+                "text": texts[i],
+                "source": "silencedetect",
+            }
+            for i in range(n)
+        ]
+
+    # More speech chunks than texts: partition into n contiguous groups.
+    # Always reserve at least one segment for each remaining line so the last
+    # cue never falls back to start=0 after segments are exhausted.
+    if len(segs) > n:
         total_speech = sum(float(s["duration"]) for s in segs) or 1.0
         target = total_speech / n
         cues: List[Dict[str, Any]] = []
         seg_i = 0
         for line_i in range(n):
-            acc = 0.0
-            start = float(segs[seg_i]["start"]) if seg_i < len(segs) else 0.0
-            end = start
-            while seg_i < len(segs):
-                s = segs[seg_i]
-                if acc > 0 and acc >= target * 0.85 and line_i < n - 1:
-                    break
-                end = float(s["end"])
-                acc += float(s["duration"])
-                seg_i += 1
-                if acc >= target and line_i < n - 1:
-                    break
-            if line_i == n - 1 and segs:
-                end = float(segs[-1]["end"])
+            remaining_lines = n - line_i
+            remaining_segs = len(segs) - seg_i
+            max_take = max(1, remaining_segs - (remaining_lines - 1))
+            if remaining_segs <= 0:
+                # Should not happen with reservation; equal-slice fallback.
+                per = (total_duration or total_speech) / n
+                start = line_i * per
+                end = (line_i + 1) * per
+            else:
+                acc = 0.0
+                start = float(segs[seg_i]["start"])
+                end = start
+                take = 0
+                while take < max_take and seg_i < len(segs):
+                    s = segs[seg_i]
+                    end = float(s["end"])
+                    acc += float(s["duration"])
+                    seg_i += 1
+                    take += 1
+                    if (
+                        line_i < n - 1
+                        and acc >= target * 0.85
+                        and (len(segs) - seg_i) >= (remaining_lines - 1)
+                    ):
+                        break
+                if line_i == n - 1 and segs:
+                    end = float(segs[-1]["end"])
+                    seg_i = len(segs)
             cues.append(
                 {
                     "index": line_i + 1,
@@ -503,6 +535,7 @@ def prepare_audio_and_cues(
             check=True,
             capture_output=True,
             text=True,
+            timeout=120,
         )
         audio_path = extracted
         audio_source = "captured"
