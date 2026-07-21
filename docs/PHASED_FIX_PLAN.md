@@ -23,7 +23,7 @@
 
 | Phase | Name | Priority | Status | Depends on | Est. |
 |-------|------|----------|--------|------------|------|
-| **0** | Land PR #39 on `main` | Blocker | READY (merge branch) | — | 0.5d |
+| **0** | Land PR #39 on `main` | Blocker | DONE | — | 0.5d |
 | **1** | Product A/V duration contract | P0 | DONE (branch) | 0 | 2d |
 | **2** | Generation fail-closed | P0 | DONE (branch) | 0 | 1.5d |
 | **3** | Honest sendable / `video_usable` | P0 | DONE (branch) | 0 (2 recommended) | 1.5d |
@@ -644,3 +644,4 @@ After Phase 7:
 | 2026-07-21 | engineering | Phase 3 implemented: compute_sendable; video_usable != size-only; PR comment split |
 | 2026-07-21 | engineering | Phase 4–5: job deadlines + stale recovery; CaptureProof AB/PW parity |
 | 2026-07-21 | engineering | Phase 6–8: full_page_debug wired; audit_pipeline.py; fixture_e2e + demo_app |
+| 2026-07-21 | engineering | Phase 0: PR #39 squash-merged to main |
