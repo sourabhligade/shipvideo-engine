@@ -343,6 +343,12 @@ def check_already_ran(repo: str, pr_number: int, commit_sha: str) -> bool:
 
 
 def record_run(repo: str, pr_number: int, commit_sha: str) -> None:
+    """
+    Mark a successful demo run for dedupe.
+
+    Call ONLY after a sendable video is published. Failed attempts must NOT
+    call this, so the same commit can be retried.
+    """
     if not commit_sha:
         return
     key = f"{repo}#{pr_number}#{commit_sha}"
@@ -359,6 +365,27 @@ def record_run(repo: str, pr_number: int, commit_sha: str) -> None:
         if len(runs) > MAX_DEDUPE_ENTRIES:
             by_time = sorted(runs.items(), key=lambda x: x[1])
             runs = dict(by_time[-MAX_DEDUPE_ENTRIES:])
+        with open(DEDUPE_FILE, "w") as f:
+            json.dump({"runs": runs}, f)
+
+
+def clear_run(repo: str, pr_number: int, commit_sha: str) -> None:
+    """Remove a dedupe key (tests / manual retry override)."""
+    if not commit_sha:
+        return
+    key = f"{repo}#{pr_number}#{commit_sha}"
+    _ensure_data_dir()
+    with _lock:
+        if not DEDUPE_FILE.exists():
+            return
+        try:
+            with open(DEDUPE_FILE) as f:
+                runs = json.load(f).get("runs", {})
+        except Exception:
+            return
+        if key not in runs:
+            return
+        runs.pop(key, None)
         with open(DEDUPE_FILE, "w") as f:
             json.dump({"runs": runs}, f)
 

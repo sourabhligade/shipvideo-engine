@@ -10,6 +10,7 @@ from observability import pipeline_step
 from app.config_types import load_capture_settings
 from app.dom_schema import SuccessCondition
 from app.execution.step_runner import run_ab_stepwise, run_stepwise
+from app.steps.capture_proof import apply_proof_to_summary, build_capture_proof
 
 BASE_APP_DIR = Path(__file__).resolve().parent.parent
 SCREENSHOT_DIR = BASE_APP_DIR / "screenshots"
@@ -380,13 +381,30 @@ def run_capture(
     _result["approved_frames"] = approved_frames
     _result["render_approval"] = render_approval
 
-
-
+    # Phase 5: normalize AB/PW into one CaptureProof schema
+    _runner_for_proof = dict(_runner_result)
+    _runner_for_proof["success"] = bool(_result.get("success"))
+    _runner_for_proof["steps_succeeded"] = int(_result.get("steps_succeeded") or 0)
+    _runner_for_proof["steps_failed"] = int(_result.get("steps_failed") or 0)
+    _runner_for_proof["failure_reason"] = _result.get("failure_reason")
+    _runner_for_proof["approved_frames"] = approved_frames
+    proof = build_capture_proof(
+        plan=steps,
+        runner_result=_runner_for_proof,
+        engine=_engine,
+        backend=BROWSER_BACKEND,
+        approved_frames=approved_frames,
+    )
+    apply_proof_to_summary(_result, proof)
 
     _result["backend"] = BROWSER_BACKEND
     _result["mode"] = _active_mode
     _result["test_case_id"] = test_case_id
-    _result["final_outcome"] = _runner_result.get("final_outcome", "inconclusive")
+    _result["final_outcome"] = (
+        proof.final_outcome
+        or _runner_result.get("final_outcome")
+        or "inconclusive"
+    )
     _result["benchmark_outcome"] = "inconclusive"
     _result["benchmark_has_paired_baseline"] = False
     _result["repo_decision_outcome"] = "inconclusive"

@@ -17,14 +17,21 @@ from app.preview_url_resolver import get_preview_url, wait_for_preview_ready
 from app.config import load_config
 import time
 from observability import init_tracing, pipeline_run_span, print_pipeline_summary, set_current_span_error
+from contextlib import asynccontextmanager
+
 from github import Github
 
-app = FastAPI()
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    try:
+        init_tracing()
+    except Exception as e:
+        print(f"[webhook] init_tracing failed (non-fatal): {type(e).__name__}: {e}", flush=True)
+    yield
 
 
-@app.on_event("startup")
-def on_startup():
-    init_tracing()
+app = FastAPI(lifespan=_lifespan)
 
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -193,6 +200,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     commit_sha: str = ""
     start_route: str | None = None
     force: bool = False
+    comment_triggered: bool = False
     diff_files: list[dict[str, str]] | None = None
 
 
@@ -228,39 +236,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 )
             return {"status": "skipped"}
 
-        if trigger_mode == "smart" and not force:
-
-
-            diff_files = fetch_pr_diff(repo_full_name, pr_number)
-            changed_lines = 0
-            for f in diff_files:
-                if _is_ui_path(f.get("path", ""), include_prefixes=include_prefixes, exclude_substrings=exclude_substrings):
-                    changed_lines += _count_patch_changed_lines(f.get("patch", ""))
-
-            if changed_lines < threshold:
-                print(
-                    f"[webhook] smart-skip changed_lines={changed_lines} threshold={threshold} "
-                    f"mode={trigger_mode} repo={repo_full_name} pr={pr_number}",
-                    flush=True,
-                )
-                if skip_comment:
-                    comment_on_pr(
-                        repo_full_name,
-                        pr_number,
-                        None,
-                        error_message=(
-                            f"**Demo not generated**\n\n"
-                            f"Smart mode skipped this run: UI changed lines={changed_lines} < threshold={threshold}.\n\n"
-                            f"Comment `{comment_command} --force` to override."
-                        ),
-                    )
-                return {"status": "skipped"}
-            else:
-                print(
-                    f"[webhook] smart-run changed_lines={changed_lines} threshold={threshold} "
-                    f"mode={trigger_mode} repo={repo_full_name} pr={pr_number}",
-                    flush=True,
-                )
+        # Smart/auto filtering is owned by evaluate_trigger (analyze_pr).
 
 
     else:
@@ -281,6 +257,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
             return {"status": "ignored"}
 
         force = bool(parsed.get("force", False))
+        comment_triggered = True
         start_route = parsed.get("route")
 
 
@@ -304,7 +281,6 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 if check_already_ran(repo_full_name, pr_number, commit_sha):
                     print("[llm-guards] skipping duplicate run", flush=True)
                     return
-                record_run(repo_full_name, pr_number, commit_sha)
 
                 delay = config.get("deployment_delay_seconds", 0)
                 if delay > 0:
@@ -338,10 +314,63 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         staging_url=staging_url,
                         diff_files=diff_files,
                         start_route=start_route,
+                        force=force,
+                        comment_triggered=comment_triggered,
                     )
                 )
 
-                steps = flow.get("steps") or [{"action": "screenshot"}]
+                if flow.get("skipped"):
+                    skip_reason = str(flow.get("reason") or "Demo generation skipped.")
+                    print(
+                        f"[webhook] analyze_pr skipped reason={skip_reason!r}",
+                        flush=True,
+                    )
+                    if skip_comment:
+                        comment_on_pr(
+                            repo_full_name,
+                            pr_number,
+                            None,
+                            error_message=(
+                                f"**Demo not generated**\n\n{skip_reason}"
+                            ),
+                        )
+                    return
+
+                if flow.get("generation_hard_fail") or flow.get("ok") is False:
+                    fail_reason = str(
+                        flow.get("error")
+                        or flow.get("generation_fallback_reason")
+                        or "Step generation failed."
+                    )
+                    print(
+                        f"[webhook] generation hard_fail reason={fail_reason!r}",
+                        flush=True,
+                    )
+                    comment_on_pr(
+                        repo_full_name,
+                        pr_number,
+                        None,
+                        error_message=(
+                            "**Demo video not generated**\n\n"
+                            f"{fail_reason}\n\n"
+                            "No fallback screenshot demo was published for this PR."
+                        ),
+                    )
+                    return
+
+                steps = list(flow.get("steps") or [])
+                if not steps:
+                    comment_on_pr(
+                        repo_full_name,
+                        pr_number,
+                        None,
+                        error_message=(
+                            "**Demo video not generated**\n\n"
+                            "Step generation produced an empty plan."
+                        ),
+                    )
+                    return
+
                 generation_context = flow.get("generation_context")
                 budget_exceeded = flow.get("budget_exceeded", False)
                 run_llm_cost_usd = float(flow.get("llm_cost_usd", 0.0) or 0.0)
@@ -407,8 +436,46 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                     print("[webhook] posting comment to PR", flush=True)
                     extra_note = None
                     if budget_exceeded:
-                        extra_note = "**Monthly budget limit reached.** This demo used fallback steps (no LLM)."
-                    comment_on_pr(repo_full_name, pr_number, video_url, extra_note=extra_note)
+                        extra_note = (
+                            "**Monthly budget limit reached.** "
+                            "This demo used a limited generation path."
+                        )
+                    elif flow.get("generation_soft_fallback"):
+                        extra_note = (
+                            "General demo mode: screenshot-only plan "
+                            f"({flow.get('generation_fallback_reason') or 'soft fallback'})."
+                        )
+                    is_sendable = capture_summary.get("sendable")
+                    if is_sendable is None:
+                        approval = capture_summary.get("render_approval") or {}
+                        if "is_sendable" in approval:
+                            is_sendable = bool(approval.get("is_sendable"))
+                        else:
+                            is_sendable = True
+                    sendable_reasons = list(
+                        (capture_summary.get("sendable_proof") or {}).get("reasons")
+                        or (capture_summary.get("render_approval") or {}).get("reasons")
+                        or []
+                    )
+                    if is_sendable is False:
+                        comment_on_pr(
+                            repo_full_name,
+                            pr_number,
+                            video_url,
+                            extra_note=extra_note,
+                            sendable=False,
+                            sendable_reasons=sendable_reasons,
+                        )
+                        # Do not mark run complete as a successful demo
+                    else:
+                        comment_on_pr(
+                            repo_full_name,
+                            pr_number,
+                            video_url,
+                            extra_note=extra_note,
+                            sendable=True,
+                        )
+                        record_run(repo_full_name, pr_number, commit_sha)
                 except Exception as e:
 
                     err_text = f"{type(e).__name__}: {e}"

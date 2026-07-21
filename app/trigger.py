@@ -110,28 +110,32 @@ def evaluate_trigger(
     config: Dict[str, Any],
     *,
     force: bool = False,
+    comment_triggered: bool = False,
 ) -> TriggerDecision:
     trigger_cfg: Dict[str, Any] = config.get("trigger") or {}
     mode: str = (trigger_cfg.get("mode") or "auto").lower()
     threshold: int = int(trigger_cfg.get("threshold") or 5)
     comment_cmd: str = trigger_cfg.get("commentCommand") or "/demo"
 
+    matched = [f for f in diff_files if is_ui_file(f.get("path") or "")]
+    matched_paths = [f.get("path", "") for f in matched]
+
     if force:
+        general_demo = len(matched) == 0
         return TriggerDecision(
             should_run=True,
             reason="Force flag set; skipping all file filters.",
-            matched_files=[f.get("path", "") for f in diff_files],
+            matched_files=matched_paths or [f.get("path", "") for f in diff_files],
+            general_demo=general_demo,
         )
 
-    if mode == "on-demand":
+    if mode == "on-demand" and not comment_triggered:
         return TriggerDecision(
             should_run=False,
             reason=(
                 f"on-demand mode: comment `{comment_cmd}` on this PR to generate a demo."
             ),
         )
-
-    matched = [f for f in diff_files if is_ui_file(f.get("path") or "")]
 
     if not matched:
         return TriggerDecision(
@@ -142,7 +146,7 @@ def evaluate_trigger(
             ),
         )
 
-    if mode == "smart":
+    if mode == "smart" and not comment_triggered:
         magnitude = sum(_file_magnitude(f) for f in matched)
         if magnitude < threshold:
             return TriggerDecision(
@@ -151,11 +155,14 @@ def evaluate_trigger(
                     f"Changes below smart threshold ({magnitude}/{threshold} lines changed). "
                     f"Comment `{comment_cmd} --force` to generate a demo anyway."
                 ),
-                matched_files=[f.get("path", "") for f in matched],
+                matched_files=matched_paths,
             )
 
+    reason = f"{len(matched)} UI file(s) changed."
+    if comment_triggered and mode == "on-demand":
+        reason = f"on-demand comment triggered; {reason}"
     return TriggerDecision(
         should_run=True,
-        reason=f"{len(matched)} UI file(s) changed.",
-        matched_files=[f.get("path", "") for f in matched],
+        reason=reason,
+        matched_files=matched_paths,
     )

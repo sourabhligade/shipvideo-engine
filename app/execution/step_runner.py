@@ -4,7 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from playwright.sync_api import Page, sync_playwright
@@ -807,6 +807,39 @@ def _get_generation_context(objective: Optional[Dict[str, Any]]) -> Dict[str, An
     return generation_context if isinstance(generation_context, dict) else {}
 
 
+def _allowed_routes_from_objective(objective: Optional[Dict[str, Any]]) -> set:
+    """Generation-time routes (crawl / real_routes / start_route) for runtime goto authority."""
+    gc = _get_generation_context(objective)
+    routes: set = set()
+    for raw in gc.get("real_routes") or []:
+        r = str(raw or "").strip()
+        if r:
+            routes.add(r)
+    start = str(gc.get("start_route") or "").strip()
+    if start:
+        routes.add(start)
+    for raw in gc.get("start_route_candidates") or []:
+        r = str(raw or "").strip()
+        if r:
+            routes.add(r)
+    routes.add("/")
+    return routes
+
+
+def _merge_allowed_routes_into_dom_ctx(
+    dom_ctx: Dict[str, Any],
+    allowed_routes: Optional[set],
+) -> Dict[str, Any]:
+    if not allowed_routes:
+        return dom_ctx
+    merged = dict(dom_ctx or {})
+    existing = {str(r).strip() for r in (merged.get("routes") or []) if str(r).strip()}
+    existing |= {str(r).strip() for r in allowed_routes if str(r).strip()}
+    merged["routes"] = sorted(existing)
+    return merged
+
+
+
 def _objective_changed_testids(objective: Optional[Dict[str, Any]]) -> List[str]:
     generation_context = _get_generation_context(objective)
     changed_testids = generation_context.get("changed_testids") or []
@@ -1292,9 +1325,13 @@ def _recover_ab_prerequisite_steps(
             "blocked_target_present": True,
         }
 
+    ab_allowed = _allowed_routes_from_objective(objective)
+    ab_dom = _merge_allowed_routes_into_dom_ctx(
+        _ab_snapshot_to_dom_context(snap_after), ab_allowed
+    )
     regenerated, attempts = regenerate_with_feedback(
         objective=objective,
-        dom_context=_ab_snapshot_to_dom_context(snap_after),
+        dom_context=ab_dom,
         error_context={
             "error": "prerequisite_failure",
             "trigger_reason": trigger_reason,
@@ -1308,6 +1345,7 @@ def _recover_ab_prerequisite_steps(
         },
         max_attempts=1,
         page=None,
+        allowed_routes=ab_allowed,
     )
     if not regenerated:
         return {
@@ -1740,6 +1778,40 @@ def _terminal_match_in_snapshot(snapshot: Dict[str, Any], expected: str) -> bool
     return False
 
 
+def _resolve_terminal_expectation(step: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """Normalize assert_terminal fields into a condition + expected element/text/url value."""
+    raw_condition = step.get("condition") if isinstance(step.get("condition"), dict) else {}
+    condition: Dict[str, Any] = dict(raw_condition or {})
+    cond_type = str(condition.get("type") or "").strip()
+    cond_value = str(condition.get("value") or "").strip()
+    expected_element = str(step.get("expected_element") or "").strip()
+    expected_text = str(step.get("expected_text") or "").strip()
+    expected_url = str(step.get("expected_url") or "").strip()
+
+    if not cond_type:
+        if expected_url:
+            cond_type, cond_value = "url_match", expected_url
+        elif expected_text:
+            cond_type, cond_value = "text_present", expected_text
+        elif expected_element or cond_value:
+            cond_type = "element_present"
+            cond_value = expected_element or cond_value
+    else:
+        if cond_type == "url_match" and not cond_value:
+            cond_value = expected_url
+        elif cond_type == "text_present" and not cond_value:
+            cond_value = expected_text
+        elif cond_type == "element_present" and not cond_value:
+            cond_value = expected_element
+
+    if cond_type == "element_present" and not expected_element:
+        expected_element = cond_value
+
+    condition["type"] = cond_type
+    condition["value"] = cond_value
+    return condition, expected_element
+
+
 def _assert_ab_terminal_condition(
     cli: Any,
     *,
@@ -1749,33 +1821,57 @@ def _assert_ab_terminal_condition(
 ) -> Dict[str, Any]:
     cond_type = str(condition.get("type") or "").strip()
     cond_value = str(condition.get("value") or "").strip()
-    expected = expected_element or cond_value
-    if not cond_type and expected_element:
+    expected = (expected_element or cond_value or "").strip()
+    if not cond_type and expected:
         cond_type = "element_present"
-        cond_value = expected_element
+        cond_value = expected
     result: Dict[str, Any] = {
-        "found": True,
+        "found": False,
         "source": "none",
         "actual": "",
     }
 
+    if not cond_type or (cond_type != "element_present" and not cond_value) or (
+        cond_type == "element_present" and not expected
+    ):
+        result["source"] = "missing_terminal_condition"
+        return result
+
     if cond_type == "text_present" and cond_value:
         try:
             cli.wait_for_text(cond_value, timeout=AB_VALIDATION_WAIT_TIMEOUT_S)
+            result["found"] = True
             result["source"] = "wait_for_text"
             result["actual"] = cond_value
             return result
         except Exception:
-            pass
+            result["source"] = "text_present_failed"
+            result["actual"] = cond_value
+            return result
 
     if cond_type == "url_match" and cond_value:
         try:
             cli.wait_for_url(cond_value, timeout=AB_VALIDATION_WAIT_TIMEOUT_S)
+            result["found"] = True
             result["source"] = "wait_for_url"
-            result["actual"] = cli.get_url()
+            try:
+                result["actual"] = cli.get_url()
+            except Exception:
+                result["actual"] = cond_value
             return result
         except Exception:
-            pass
+            try:
+                current = cli.get_url()
+            except Exception:
+                current = ""
+            if cond_value and cond_value in str(current or ""):
+                result["found"] = True
+                result["source"] = "url_match_substring"
+                result["actual"] = current
+                return result
+            result["source"] = "url_match_failed"
+            result["actual"] = current or cond_value
+            return result
 
     if cond_type == "element_present" and expected:
         if _wait_for_ab_element_present(
@@ -1783,6 +1879,7 @@ def _assert_ab_terminal_condition(
             expected,
             timeout_s=AB_VALIDATION_WAIT_TIMEOUT_S,
         ):
+            result["found"] = True
             result["source"] = "wait_for_element_present"
             result["actual"] = expected
             return result
@@ -1791,6 +1888,7 @@ def _assert_ab_terminal_condition(
         if testid_ref:
             try:
                 if cli.is_visible(testid_ref):
+                    result["found"] = True
                     result["source"] = "find_testid_visible"
                     result["actual"] = testid_ref
                     return result
@@ -1805,6 +1903,7 @@ def _assert_ab_terminal_condition(
             if semantic_ref:
                 try:
                     if cli.is_visible(semantic_ref):
+                        result["found"] = True
                         result["source"] = "find_element_visible"
                         result["actual"] = semantic_ref
                         return result
@@ -1815,21 +1914,84 @@ def _assert_ab_terminal_condition(
         if semantic_ref:
             try:
                 if cli.is_visible(semantic_ref):
+                    result["found"] = True
                     result["source"] = "semantic_find_visible"
                     result["actual"] = semantic_ref
                     return result
             except Exception:
                 pass
 
-    if expected:
         terminal_snapshot = extract_snapshot(save_raw=False)
         found = _terminal_match_in_snapshot(terminal_snapshot, expected)
-        result["found"] = found
+        result["found"] = bool(found)
         result["source"] = "snapshot_visible_elements"
         result["actual"] = expected if found else ""
         return result
 
+    result["source"] = "missing_terminal_condition"
     return result
+
+
+def _assert_playwright_terminal_condition(page: Page, step: Dict[str, Any]) -> tuple[bool, str]:
+    condition = step.get("condition") if isinstance(step.get("condition"), dict) else {}
+    cond_type = str(condition.get("type") or "").strip()
+    cond_value = str(condition.get("value") or "").strip()
+    expected_element = (
+        str(step.get("expected_element") or "").strip()
+        or cond_value
+    )
+    expected_text = str(step.get("expected_text") or "").strip()
+    expected_url = str(step.get("expected_url") or "").strip()
+
+    if not cond_type:
+        if expected_url:
+            cond_type = "url_match"
+            cond_value = expected_url
+        elif expected_text:
+            cond_type = "text_present"
+            cond_value = expected_text
+        elif expected_element:
+            cond_type = "element_present"
+            cond_value = expected_element
+
+    if cond_type == "url_match" and (cond_value or expected_url):
+        needle = cond_value or expected_url
+        try:
+            page.wait_for_url(f"**{needle}**", timeout=8000)
+            return True, "url_match"
+        except Exception:
+            current = ""
+            try:
+                current = page.url or ""
+            except Exception:
+                pass
+            if needle in current:
+                return True, "url_match"
+            return False, f"terminal_url_not_matched:{needle}"
+
+    if cond_type == "text_present" and (cond_value or expected_text):
+        needle = cond_value or expected_text
+        try:
+            page.get_by_text(needle, exact=False).first.wait_for(state="visible", timeout=8000)
+            return True, "text_present"
+        except Exception:
+            return False, f"terminal_text_not_found:{needle}"
+
+    if expected_element or (cond_type == "element_present" and cond_value):
+        needle = expected_element or cond_value
+        for selector in (f"[data-testid='{needle}']", f"#{needle}", needle):
+            try:
+                page.locator(selector).first.wait_for(state="visible", timeout=4000)
+                return True, "element_present"
+            except Exception:
+                pass
+        try:
+            page.get_by_text(needle, exact=False).first.wait_for(state="visible", timeout=4000)
+            return True, "element_present_text"
+        except Exception:
+            return False, f"terminal_element_not_found:{needle}"
+
+    return False, "missing_terminal_condition"
 
 
 def _execute_one(
@@ -1850,11 +2012,29 @@ def _execute_one(
         text = (step.get("label") or step.get("text") or "").strip()
         validation_condition = _extract_validation_condition(step)
         if selector:
-            page.locator(selector).first.click(timeout=8000)
+            loc = page.locator(selector)
+            try:
+                count = loc.count()
+            except Exception:
+                count = 0
+            if count == 0:
+                return False, shot_idx, f"selector_not_found_on_page:{selector}"
+            if count > 1:
+                return False, shot_idx, f"selector_not_unique:{selector}:count={count}"
+            loc.first.click(timeout=8000)
             _wait_for_playwright_validation(page, validation_condition)
             return True, shot_idx, None
         if text:
-            page.get_by_text(text, exact=True).first.click(timeout=8000)
+            loc = page.get_by_text(text, exact=True)
+            try:
+                count = loc.count()
+            except Exception:
+                count = 0
+            if count == 0:
+                return False, shot_idx, f"label_not_found_on_page:{text}"
+            if count > 1:
+                return False, shot_idx, f"label_not_unique:{text}:count={count}"
+            loc.first.click(timeout=8000)
             _wait_for_playwright_validation(page, validation_condition)
             return True, shot_idx, None
         return False, shot_idx, "missing_click_target"
@@ -1862,6 +2042,11 @@ def _execute_one(
         path = out_dir / f"shot{shot_idx}.png"
         page.screenshot(path=str(path), full_page=full_page)
         return True, shot_idx + 1, None
+    if action == "assert_terminal":
+        ok, reason = _assert_playwright_terminal_condition(page, step)
+        if ok:
+            return True, shot_idx, None
+        return False, shot_idx, reason or "terminal_not_reached"
     return False, shot_idx, f"unknown_action:{action}"
 
 
@@ -1884,19 +2069,23 @@ def run_stepwise(
     shot_idx = 1
     total_retries = 0                                                  
 
+    allowed_routes = _allowed_routes_from_objective(objective)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": cs.viewport_width, "height": cs.viewport_height})
         page.goto(preview_url, wait_until="domcontentloaded", timeout=15000)
         wait_stable_after_navigation(page)
-        dom_ctx = extract_dom_context(page)
+        dom_ctx = _merge_allowed_routes_into_dom_ctx(extract_dom_context(page), allowed_routes)
 
         i = 0
         while i < len(queue):
             step = queue[i]
             _step_t0 = time.monotonic()                                  
 
-            ok, reason = validate_step_against_dom(step, dom_ctx, page=page)
+            ok, reason = validate_step_against_dom(
+                step, dom_ctx, page=page, allowed_routes=allowed_routes
+            )
             if not ok:
 
                 regenerated, attempts = regenerate_with_feedback(
@@ -1905,8 +2094,9 @@ def run_stepwise(
                     error_context={"error": reason, "failed_step": step},
                     max_attempts=max_retries_per_failure,
                     page=page,
+                    allowed_routes=allowed_routes,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)           
                 _log("step.regenerated_on_validation_failure", {"index": i, "reason": reason, "attempts": attempts})
                 if not regenerated:
                     browser.close()
@@ -1926,7 +2116,14 @@ def run_stepwise(
                 step = queue[i]
 
             prev = capture_state(page)
-            ok_exec, shot_idx, err = _execute_one(page, preview_url, step, screenshot_dir, shot_idx, full_page=cs.full_page_screenshots)
+            ok_exec, shot_idx, err = _execute_one(
+                page,
+                preview_url,
+                step,
+                screenshot_dir,
+                shot_idx,
+                full_page=cs.effective_full_page,
+            )
             if not ok_exec:
                 regenerated, attempts = regenerate_with_feedback(
                     objective=objective,
@@ -1934,8 +2131,9 @@ def run_stepwise(
                     error_context={"error": err or "execution_failed", "failed_step": step},
                     max_attempts=max_retries_per_failure,
                     page=page,
+                    allowed_routes=allowed_routes,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)           
                 _log("step.regenerated_on_execution_failure", {"index": i, "error": err, "attempts": attempts})
                 if not regenerated:
                     browser.close()
@@ -1956,17 +2154,23 @@ def run_stepwise(
 
             _step_latency_ms = int((time.monotonic() - _step_t0) * 1000)           
             step_result = {"index": i, "step": step, "status": "ok", "step_latency_ms": _step_latency_ms}
-            if str(step.get("action") or "") == "screenshot":
+            action_name = str(step.get("action") or "")
+            if action_name == "screenshot":
                 shot_path = screenshot_dir / f"shot{shot_idx - 1}.png"
                 step_result["screenshot_path"] = str(shot_path)
                 step_result["outcome"] = "success"
+            elif action_name == "assert_terminal":
+                step_result["outcome"] = "success"
+                step_result["terminal_condition_reached"] = True
             results.append(step_result)
 
             now = capture_state(page)
             nav_changed = detect_major_change(prev, now)
             if nav_changed:
                 wait_stable_after_navigation(page)
-                dom_ctx = extract_dom_context(page)
+                dom_ctx = _merge_allowed_routes_into_dom_ctx(
+                    extract_dom_context(page), allowed_routes
+                )
 
                 remaining_objective = {**objective, "remaining_from_index": i + 1}
                 regenerated, attempts = regenerate_with_feedback(
@@ -1975,11 +2179,25 @@ def run_stepwise(
                     error_context={"event": "navigation_boundary", "at_index": i},
                     max_attempts=max_retries_per_failure,
                     page=page,
+                    allowed_routes=allowed_routes,
                 )
-                total_retries += attempts           
+                total_retries += len(attempts)
                 _log("navigation.reanchored", {"index": i, "attempts": attempts})
-                if regenerated:
-                    queue = queue[: i + 1] + regenerated
+                if not regenerated:
+                    browser.close()
+                    return {
+                        "success": False,
+                        "final_outcome": _classify_final_outcome(
+                            success=False,
+                            failure_reason="navigation_reanchor_failed",
+                        ),
+                        "steps_succeeded": len(results),
+                        "steps_failed": 1,
+                        "failure_reason": "navigation_reanchor_failed",
+                        "results": results,
+                        "metrics": _build_metrics(results, len(initial_steps), total_retries),
+                    }
+                queue = queue[: i + 1] + regenerated
             i += 1
 
         browser.close()
@@ -2172,58 +2390,58 @@ def run_ab_stepwise(
 
 
             if action == "assert_terminal":
-                condition = step.get("condition") or {}
-                expected_element = (
-                    step.get("expected_element")
-                    or (condition.get("value") if isinstance(condition, dict) else "")
-                    or ""
-                )
-                found = True
+                condition, expected_element = _resolve_terminal_expectation(step)
+                found = False
                 terminal_source = ""
                 terminal_actual = ""
-                if expected_element:
-                    try:
-                        terminal_result = _assert_ab_terminal_condition(
-                            cli,
-                            condition=condition if isinstance(condition, dict) else {},
-                            expected_element=str(expected_element),
-                            extract_snapshot=lambda **kwargs: extract_ab_context(cli, **kwargs),
-                        )
-                        found = bool(terminal_result.get("found"))
-                        terminal_source = str(terminal_result.get("source") or "")
-                        terminal_actual = str(terminal_result.get("actual") or "")
-                    except AgentBrowserError as exc:
-                        step_result.update(
-                            {
-                                "status": "failed",
-                                "outcome": "click_failed",
-                                "error": f"snapshot_failed:{exc}",
-                            }
-                        )
-                        _attach_ab_failure_diagnostics(cli, step_result)
-                        step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
-                        results.append(step_result)
-                        return {
-                            "success": False,
-                            "final_outcome": _classify_final_outcome(
-                                success=False,
-                                failure_reason=f"snapshot_failed:{exc}",
-                            ),
-                            "steps_succeeded": steps_succeeded,
-                            "steps_failed": 1,
-                            "failure_reason": f"snapshot_failed:{exc}",
-                            "results": results,
-                            "metrics": _build_metrics(results, len(initial_steps), _total_retries),
+                try:
+                    terminal_result = _assert_ab_terminal_condition(
+                        cli,
+                        condition=condition,
+                        expected_element=str(expected_element or ""),
+                        extract_snapshot=lambda **kwargs: extract_ab_context(cli, **kwargs),
+                    )
+                    found = bool(terminal_result.get("found"))
+                    terminal_source = str(terminal_result.get("source") or "")
+                    terminal_actual = str(terminal_result.get("actual") or "")
+                except AgentBrowserError as exc:
+                    step_result.update(
+                        {
+                            "status": "failed",
+                            "outcome": "click_failed",
+                            "error": f"snapshot_failed:{exc}",
                         }
+                    )
+                    _attach_ab_failure_diagnostics(cli, step_result)
+                    step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
+                    results.append(step_result)
+                    return {
+                        "success": False,
+                        "final_outcome": _classify_final_outcome(
+                            success=False,
+                            failure_reason=f"snapshot_failed:{exc}",
+                        ),
+                        "steps_succeeded": steps_succeeded,
+                        "steps_failed": 1,
+                        "failure_reason": f"snapshot_failed:{exc}",
+                        "results": results,
+                        "metrics": _build_metrics(results, len(initial_steps), _total_retries),
+                    }
 
                 step_result["terminal_condition_reached"] = found
                 step_result["terminal_validation_source"] = terminal_source
                 step_result["terminal_validation_actual"] = terminal_actual
                 step_result["outcome"] = "success" if found else "terminal_not_reached"
                 if not found:
+                    expected_repr = (
+                        expected_element
+                        or condition.get("value")
+                        or condition.get("type")
+                        or ""
+                    )
                     print(
                         f"[step_runner] terminal condition not reached: "
-                        f"expected={expected_element!r}",
+                        f"expected={expected_repr!r} source={terminal_source!r}",
                         flush=True,
                     )
                 step_result["status"] = "ok" if found else "failed"

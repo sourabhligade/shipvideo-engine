@@ -26,7 +26,7 @@ def convert_webm_to_mp4(webm_path: Path, output_dir: Path) -> Path:
     ]
 
     print(f"[video_processor] converting webm→mp4 src={webm_path.name}", flush=True)
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         print(f"[video_processor] ffmpeg stderr: {result.stderr.strip()}", flush=True)
     result.check_returncode()

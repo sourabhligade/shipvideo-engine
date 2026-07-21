@@ -8,7 +8,7 @@ import requests
 from observability import pipeline_step
 
 
-MAX_PATCH_CHARS = 3000
+MAX_PATCH_CHARS = 4000
 TRUNCATION_SUFFIX = "\n... (truncated)"
 PER_PAGE = 100
 MAX_PAGES = 50

@@ -69,16 +69,36 @@ def validate_step_against_dom(
     step: Dict[str, Any],
     dom_ctx: Dict[str, Any],
     page: Optional[Page] = None,
+    *,
+    allowed_routes: Optional[set] = None,
 ) -> Tuple[bool, str]:
     action = step.get("action")
-    if action not in {"goto", "click", "screenshot"}:
+    if action not in {"goto", "click", "screenshot", "assert_terminal"}:
         return False, f"invalid_action:{action}"
+
+    if action == "assert_terminal":
+        condition = step.get("condition") if isinstance(step.get("condition"), dict) else {}
+        has_expected = bool(
+            (step.get("expected_element") or "").strip()
+            or (step.get("expected_text") or "").strip()
+            or (step.get("expected_url") or "").strip()
+            or (condition.get("value") or "").strip()
+            or (condition.get("type") or "").strip()
+        )
+        if not has_expected:
+            return False, "missing_terminal_condition"
+        return True, "ok:assert_terminal"
 
     if action == "goto":
         url = (step.get("url") or "").strip()
         if not url:
             return False, "missing_goto_url"
-        if url not in set(dom_ctx.get("routes") or []):
+        # Generation-time multi-route authority (crawl/real_routes) is valid for goto
+        # even when the live current-page extractor only lists local links.
+        routes = set(dom_ctx.get("routes") or [])
+        if allowed_routes:
+            routes |= {str(r).strip() for r in allowed_routes if str(r).strip()}
+        if url not in routes:
             return False, f"route_not_in_dom:{url}"
         return True, "ok"
 
@@ -100,8 +120,11 @@ def validate_step_against_dom(
 
 
             if page is not None:
-                if _selector_count_on_page(page, selector) == 0:
+                count = _selector_count_on_page(page, selector)
+                if count == 0:
                     return False, f"selector_not_found_on_page:{selector}"
+                if count > 1:
+                    return False, f"selector_not_unique:{selector}:count={count}"
 
             if is_testid:
                 return True, "ok:testid"
@@ -123,6 +146,8 @@ def validate_step_against_dom(
                     live_count = 0
                 if live_count == 0:
                     return False, f"label_not_found_on_page:{label}"
+                if live_count > 1:
+                    return False, f"label_not_unique:{label}:count={live_count}"
                 return True, "ok:label_live"
 
 

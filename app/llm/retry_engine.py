@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.sync_api import Page
@@ -15,6 +16,7 @@ def regenerate_with_feedback(
     error_context: Dict[str, Any],
     max_attempts: int = 3,
     page: Optional[Page] = None,
+    allowed_routes: Optional[set] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     attempts: List[Dict[str, Any]] = []
     previous_error = error_context
@@ -27,7 +29,7 @@ def regenerate_with_feedback(
                 previous_error=previous_error,
                 max_steps=2,
             )
-        except RuntimeError as e:
+        except (RuntimeError, json.JSONDecodeError, ValueError, TypeError, KeyError) as e:
             attempts.append({"attempt": i, "status": "generation_error", "error": str(e)})
             previous_error = {"error": str(e)}
             continue
@@ -39,7 +41,9 @@ def regenerate_with_feedback(
         ok_all = True
         reasons: List[str] = []
         for s in steps:
-            ok, reason = validate_step_against_dom(s, dom_context, page=page)
+            ok, reason = validate_step_against_dom(
+                s, dom_context, page=page, allowed_routes=allowed_routes
+            )
             if not ok:
                 ok_all = False
                 reasons.append(reason)
@@ -59,6 +63,7 @@ def regenerate_single_step_toward_testid(
     dom_context: Dict[str, Any],
     max_attempts: int = 2,
     page: Optional[Page] = None,
+    allowed_routes: Optional[set] = None,
 ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     attempts: List[Dict[str, Any]] = []
     previous_error: Dict[str, Any] = {}
@@ -71,11 +76,13 @@ def regenerate_single_step_toward_testid(
                 objective=objective,
                 previous_error=previous_error,
             )
-        except RuntimeError as e:
+        except (RuntimeError, json.JSONDecodeError, ValueError, TypeError, KeyError) as e:
             attempts.append({"attempt": i, "status": "generation_error", "error": str(e)})
             previous_error = {"error": str(e)}
             continue
-        ok, reason = validate_step_against_dom(step, dom_context, page=page)
+        ok, reason = validate_step_against_dom(
+            step, dom_context, page=page, allowed_routes=allowed_routes
+        )
         attempts.append({"attempt": i, "status": "ok" if ok else "rejected", "reason": reason})
         if ok:
             return step, attempts

@@ -22,6 +22,24 @@ def _normalize_selector_quotes(selector: str) -> str:
     return re.sub(r'\[(\w[\w-]*)\s*=\s*"([^"]+)"\]', r"[\1='\2']", selector)
 
 
+_STABLE_SELECTOR_RE = re.compile(
+    r"^("
+    r"\[data-testid\s*="
+    r"|\[aria-label\s*="
+    r"|#"
+    r"|(?:role|text|css|xpath|id|data-testid|aria-label|nth|has-text|has)\s*="
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_stable_selector(selector: str) -> bool:
+    s = (selector or "").strip()
+    if not s:
+        return False
+    return bool(_STABLE_SELECTOR_RE.match(s))
+
+
 def validate_steps(steps: Any) -> List[Dict[str, Any]]:
     if not isinstance(steps, list):
         return []
@@ -43,23 +61,18 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         action = step.get("action")
 
         if action == "click":
-            selector = (
+            raw_selector = (
                 step.get("selector")
                 or step.get("element")
                 or step.get("target")
                 or ""
             ).strip()
+            selector = _normalize_selector_quotes(raw_selector) if raw_selector else ""
             label = (step.get("label") or "").strip()
             text = (step.get("text") or "").strip()
+            display_label = label or text
 
-            if label:
-                base: Dict[str, Any] = {"action": "click", "label": label}
-            elif text:
-                base = {"action": "click", "label": text}
-            elif selector:
-                base = {"action": "click", "selector": selector}
-            else:
-
+            if not selector and not display_label:
                 print(
                     "[step_normalizer] dropped click step: "
                     "no label, text, or selector found",
@@ -67,13 +80,24 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 )
                 continue
 
-
+            # Prefer stable selectors (testid/aria/id/engines) for execution accuracy.
+            # Keep label/text as secondary identity for narration and soft matching.
+            base: Dict[str, Any] = {"action": "click"}
+            if selector and (_is_stable_selector(selector) or not display_label):
+                base["selector"] = selector
+                if display_label:
+                    base["label"] = display_label
+            elif display_label:
+                base["label"] = display_label
+                if selector:
+                    base["selector"] = selector
+            else:
+                base["selector"] = selector
 
             for field in _PASSTHROUGH_FIELDS:
                 val = step.get(field)
                 if val is not None:
                     base[field] = val
-
 
             for field in ("dom_confirmed", "match_confidence",
                           "dom_warning", "contract_missing"):
@@ -115,6 +139,9 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _extract_routes_from_diff(diff_files: List[Dict[str, str]]) -> Set[str]:
     routes: Set[str] = set()
     for f in diff_files:
+        status = str(f.get("status") or "").lower()
+        if status in {"removed", "deleted"}:
+            continue
         path = f.get("path", "")
 
 
