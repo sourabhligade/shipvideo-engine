@@ -50,8 +50,7 @@ def wait_for_preview_ready(
 
     deadline = time.monotonic() + timeout
     next_log = time.monotonic()
-
-
+    last_err = None
 
     ssl_context = None
     try:
@@ -87,5 +86,10 @@ def wait_for_preview_ready(
             next_log = time.monotonic() + 30
         time.sleep(interval)
 
-    print(f"[preview] not ready after timeout={timeout}s url={url}", flush=True)
+    print(
+        f"[preview] not ready after timeout={timeout}s url={url} "
+        f"(polled every {interval}s with GET then HEAD; "
+        f"last_error={last_err!r})",
+        flush=True,
+    )
     return False

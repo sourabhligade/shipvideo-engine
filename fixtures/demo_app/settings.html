@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ShipVideo Fixture Settings</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+  </style>
+</head>
+<body>
+  <h1 data-testid="settings-title">Settings</h1>
+  <p data-testid="settings-saved-hint">Configure your preferences.</p>
+  <button data-testid="save-settings" type="button" onclick="document.getElementById('status').textContent='Saved'; document.getElementById('status').setAttribute('data-testid','save-status');">
+    Save
+  </button>
+  <p id="status"></p>
+  <a data-testid="nav-home" href="/">Home</a>
+</body>
+</html>

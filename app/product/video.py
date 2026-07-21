@@ -12,6 +12,10 @@ from app.product.audio_timing import prepare_audio_and_cues
 SHIPVIDEO_AUDIT_FRAME_SECONDS = 2.8
 SHIPVIDEO_AUDIT_VIEWPORT = (1280, 720)
 SHIPVIDEO_AUDIT_MAX_VIDEO_SECONDS = 60.0
+# Durations within this gap are treated as equal for mux (no pad / no -shortest).
+AV_DURATION_TOLERANCE_SEC = 0.05
+# Final video vs audio may differ by at most this after pad policy.
+AV_CONTRACT_TOLERANCE_SEC = 0.25
 
 
 def allocate_frame_durations(
@@ -29,6 +33,118 @@ def allocate_frame_durations(
         per = max_total_seconds / float(n_frames)
     # Keep a tiny minimum so ffmpeg still produces a valid clip
     return max(0.05, per)
+
+
+def compute_frame_holds(
+    n_frames: int,
+    cues: Sequence[Dict[str, Any]],
+    audio_duration_sec: float,
+    *,
+    min_hold: float = 0.05,
+    default_hold: float = SHIPVIDEO_AUDIT_FRAME_SECONDS,
+) -> List[float]:
+    """
+    Per-frame hold seconds driven by cue timeline / audio length.
+
+    Contract: sum(holds) >= audio_duration_sec - AV_DURATION_TOLERANCE_SEC
+    (remainder is added to the last frame so narration is never cut by -shortest).
+    """
+    if n_frames <= 0:
+        return []
+    audio_duration_sec = max(0.0, float(audio_duration_sec or 0.0))
+    holds: List[float] = []
+    for i in range(n_frames):
+        if i < len(cues):
+            start = float(cues[i].get("start") or 0.0)
+            if i + 1 < len(cues):
+                next_start = float(cues[i + 1].get("start") or start)
+                dur = max(min_hold, next_start - start)
+            else:
+                end = float(cues[i].get("end") or start)
+                if audio_duration_sec > start:
+                    end = max(end, audio_duration_sec)
+                dur = max(min_hold, end - start)
+        else:
+            dur = max(min_hold, float(default_hold))
+        holds.append(dur)
+
+    total = sum(holds)
+    if audio_duration_sec > 0 and total + AV_DURATION_TOLERANCE_SEC < audio_duration_sec:
+        holds[-1] = holds[-1] + (audio_duration_sec - total)
+    elif audio_duration_sec <= 0 and total <= 0:
+        holds = [max(min_hold, default_hold)] * n_frames
+    return holds
+
+
+def build_av_mux_command(
+    silent_mp4: Path,
+    audio_path: Path,
+    output_mp4: Path,
+    *,
+    video_duration_sec: float,
+    audio_duration_sec: float,
+    tolerance_sec: float = AV_DURATION_TOLERANCE_SEC,
+) -> List[str]:
+    """
+    Build ffmpeg argv to mux silent video + narration without cutting speech.
+
+    - Never uses -shortest when that would truncate narration.
+    - If video longer than audio: pad audio with silence to video length.
+    - If video shorter than audio (should be rare after compute_frame_holds):
+      pad video with tpad freeze of last frame.
+    """
+    silent_mp4 = Path(silent_mp4)
+    audio_path = Path(audio_path)
+    output_mp4 = Path(output_mp4)
+    v = max(0.0, float(video_duration_sec or 0.0))
+    a = max(0.0, float(audio_duration_sec or 0.0))
+
+    base = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(silent_mp4),
+        "-i", str(audio_path),
+    ]
+
+    if abs(v - a) <= tolerance_sec:
+        # Streams already aligned — copy video, encode audio, do not -shortest.
+        return base + [
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            str(output_mp4),
+        ]
+
+    if v > a + tolerance_sec:
+        # Pad audio so mux length follows video (no speech cut).
+        pad_sec = max(0.0, v - a)
+        return base + [
+            "-filter_complex",
+            f"[1:a]apad=pad_dur={pad_sec:.6f}[a]",
+            "-map", "0:v:0",
+            "-map", "[a]",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-t", f"{v:.6f}",
+            "-movflags", "+faststart",
+            str(output_mp4),
+        ]
+
+    # Video shorter than audio: freeze last frame to cover remaining audio.
+    pad_sec = max(0.0, a - v)
+    return base + [
+        "-filter_complex",
+        f"[0:v]tpad=stop_mode=clone:stop_duration={pad_sec:.6f}[v]",
+        "-map", "[v]",
+        "-map", "1:a:0",
+        "-c:v", "libx264",
+        "-profile:v", "baseline",
+        "-level", "3.0",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-t", f"{a:.6f}",
+        "-movflags", "+faststart",
+        str(output_mp4),
+    ]
 
 
 def _burn_caption_on_image(image_path: Path, caption: str, out_path: Path) -> Path:
@@ -190,33 +306,38 @@ def render_journey_video(
             step.duration_sec = seconds_per_frame
         cues = build_subtitles(steps, seconds_per_frame=seconds_per_frame)
 
-    # Drive frame hold times from cue timeline so silence between lines is kept
-    # (end-start alone undercounts and desyncs slideshow vs narration).
+    # Drive frame holds from cue timeline + audio length (A/V duration contract).
     audio_total = float(audio_pack.get("audio_duration_sec") or 0.0)
-    frame_durations: List[float] = []
+    frame_durations = compute_frame_holds(
+        len(steps_with_shots),
+        cues,
+        audio_total,
+        min_hold=0.05,
+        default_hold=seconds_per_frame,
+    )
     for i, step in enumerate(steps_with_shots):
-        if i < len(cues):
-            start = float(cues[i]["start"])
-            if i + 1 < len(cues):
-                dur = max(0.05, float(cues[i + 1]["start"]) - start)
-            else:
-                end = audio_total if audio_total > start else float(cues[i]["end"])
-                dur = max(0.05, end - start)
-        else:
-            dur = seconds_per_frame
-        frame_durations.append(dur)
-        step.duration_sec = dur
+        if i < len(frame_durations):
+            step.duration_sec = frame_durations[i]
 
     total_duration = sum(frame_durations)
     if total_duration > max_total_seconds and total_duration > 0:
         scale = max_total_seconds / total_duration
         frame_durations = [max(0.05, d * scale) for d in frame_durations]
         for i, step in enumerate(steps_with_shots):
-            step.duration_sec = frame_durations[i]
-        # rescale cues
+            if i < len(frame_durations):
+                step.duration_sec = frame_durations[i]
         for cue in cues:
             cue["start"] = float(cue["start"]) * scale
             cue["end"] = float(cue["end"]) * scale
+        total_duration = sum(frame_durations)
+        audio_total = audio_total * scale
+
+    # After scaling, re-assert silent video covers (scaled) audio.
+    if audio_total > 0 and total_duration + AV_DURATION_TOLERANCE_SEC < audio_total:
+        extra = audio_total - total_duration
+        frame_durations[-1] = frame_durations[-1] + extra
+        if steps_with_shots:
+            steps_with_shots[-1].duration_sec = frame_durations[-1]
         total_duration = sum(frame_durations)
 
     seconds_per_frame = (
@@ -309,20 +430,19 @@ def render_journey_video(
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg slideshow failed: {result.stderr or result.stdout}")
 
-    # Mux narration audio when present
+    # Mux narration audio when present — never cut speech via -shortest.
     audio_path = audio_pack.get("audio_path")
+    mux_cmd: Optional[List[str]] = None
     if audio_path and Path(audio_path).exists():
+        mux_cmd = build_av_mux_command(
+            silent_mp4,
+            Path(audio_path),
+            output_mp4,
+            video_duration_sec=total_duration,
+            audio_duration_sec=audio_total,
+        )
         mux = subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-i", str(silent_mp4),
-                "-i", str(audio_path),
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-shortest",
-                "-movflags", "+faststart",
-                str(output_mp4),
-            ],
+            mux_cmd,
             capture_output=True,
             text=True,
             timeout=120,
@@ -331,8 +451,10 @@ def render_journey_video(
             raise RuntimeError(
                 f"ffmpeg mux failed: {(mux.stderr or mux.stdout or '').strip()}"
             )
+        final_duration = max(total_duration, audio_total)
     else:
         output_mp4.write_bytes(silent_mp4.read_bytes())
+        final_duration = total_duration
 
     return {
         "video": str(output_mp4),
@@ -342,7 +464,10 @@ def render_journey_video(
         "subtitles_burned": subtitles_burned,
         "cues": cues,
         "seconds_per_frame": seconds_per_frame,
-        "total_duration_sec": total_duration,
+        "frame_holds_sec": list(frame_durations),
+        "total_duration_sec": final_duration,
+        "silent_duration_sec": total_duration,
+        "audio_duration_sec": audio_total,
         "max_total_seconds": max_total_seconds,
         "headless": True,
         "audio_source": audio_pack.get("audio_source"),
@@ -350,4 +475,6 @@ def render_journey_video(
         "speech_segments": audio_pack.get("speech_segments"),
         "silencedetect_command": audio_pack.get("silencedetect", {}).get("command_str"),
         "silencedetect": audio_pack.get("silencedetect"),
+        "mux_command": mux_cmd,
+        "av_contract_tolerance_sec": AV_CONTRACT_TOLERANCE_SEC,
     }

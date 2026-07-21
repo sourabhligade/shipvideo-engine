@@ -49,6 +49,78 @@ except Exception:
 FALLBACK_STEPS: List[Dict[str, Any]] = [{"action": "screenshot"}]
 
 
+def _soft_fallback_result(
+    *,
+    narration: str,
+    reason: str,
+    llm_cost_usd: float = 0.0,
+    budget_exceeded: bool = False,
+) -> Dict[str, Any]:
+    """Allowed only for general_demo: explicit screenshot-only plan."""
+    print(
+        f"[steps.step_generation] soft_fallback reason={reason!r}",
+        flush=True,
+    )
+    return {
+        "steps": list(FALLBACK_STEPS),
+        "narration": narration,
+        "budget_exceeded": budget_exceeded,
+        "llm_cost_usd": llm_cost_usd,
+        "generation_context": None,
+        "ok": True,
+        "generation_soft_fallback": True,
+        "generation_hard_fail": False,
+        "generation_fallback_reason": reason,
+    }
+
+
+def _hard_fail_result(
+    *,
+    narration: str,
+    reason: str,
+    llm_cost_usd: float = 0.0,
+    budget_exceeded: bool = False,
+) -> Dict[str, Any]:
+    """Feature demos must not collapse to a fake screenshot plan."""
+    print(
+        f"[steps.step_generation] hard_fail reason={reason!r}",
+        flush=True,
+    )
+    return {
+        "steps": [],
+        "narration": narration,
+        "budget_exceeded": budget_exceeded,
+        "llm_cost_usd": llm_cost_usd,
+        "generation_context": None,
+        "ok": False,
+        "error": reason,
+        "generation_soft_fallback": False,
+        "generation_hard_fail": True,
+        "generation_fallback_reason": reason,
+    }
+
+
+def _collapse_result(
+    *,
+    general_demo: bool,
+    narration: str,
+    reason: str,
+    llm_cost_usd: float = 0.0,
+    budget_exceeded: bool = False,
+) -> Dict[str, Any]:
+    if general_demo:
+        return _soft_fallback_result(
+            narration=narration,
+            reason=reason,
+            llm_cost_usd=llm_cost_usd,
+            budget_exceeded=budget_exceeded,
+        )
+    return _hard_fail_result(
+        narration=narration,
+        reason=reason,
+        llm_cost_usd=llm_cost_usd,
+        budget_exceeded=budget_exceeded,
+    )
 
 
 
@@ -1011,17 +1083,12 @@ async def generate_steps_from_diff(
         print("[steps.step_generation] generating steps from diff", flush=True)
 
         if not check_budget():
-            print(
-                "[steps.step_generation] budget limit reached; using fallback",
-                flush=True,
+            return _collapse_result(
+                general_demo=general_demo,
+                narration=fallback_narration,
+                reason="Monthly LLM budget limit reached; cannot generate demo steps.",
+                budget_exceeded=True,
             )
-            return {
-                "steps": FALLBACK_STEPS,
-                "narration": fallback_narration,
-                "budget_exceeded": True,
-                "llm_cost_usd": 0.0,
-                "generation_context": None,
-            }
 
         start_route = (start_route or "").strip()
         allowed_routes_override = None
@@ -1097,11 +1164,11 @@ async def generate_steps_from_diff(
         diff_text = json.dumps(budgeted, ensure_ascii=False)
 
         if should_skip_llm_for_size(len(diff_text)):
-            return {
-                "steps": FALLBACK_STEPS,
-                "narration": fallback_narration,
-                "llm_cost_usd": 0.0,
-            }
+            return _collapse_result(
+                general_demo=general_demo,
+                narration=fallback_narration,
+                reason="Diff payload too large for LLM; demo steps not generated.",
+            )
 
 
 
@@ -1234,7 +1301,15 @@ async def generate_steps_from_diff(
                 record_spend(pt, ct)
                 total_cost += round(estimate_run_cost(pt, ct), 4)
 
-            steps = data.get("steps") or FALLBACK_STEPS
+            steps = data.get("steps") if isinstance(data.get("steps"), list) else []
+            steps = [s for s in steps if isinstance(s, dict)]
+            if not steps:
+                return _collapse_result(
+                    general_demo=general_demo,
+                    narration=fallback_narration,
+                    reason="LLM returned empty step plan.",
+                    llm_cost_usd=total_cost,
+                )
             _log_click_stage("raw_llm_steps", steps)
 
 
@@ -1278,11 +1353,21 @@ async def generate_steps_from_diff(
 
             validated = validate_steps(dom_grounded)
             if not validated:
-                validated = FALLBACK_STEPS
+                return _collapse_result(
+                    general_demo=general_demo,
+                    narration=fallback_narration,
+                    reason="No valid steps remained after action validation.",
+                    llm_cost_usd=total_cost,
+                )
 
             normalized = normalize_steps(validated)
             if not normalized:
-                normalized = FALLBACK_STEPS
+                return _collapse_result(
+                    general_demo=general_demo,
+                    narration=fallback_narration,
+                    reason="No steps remained after normalization.",
+                    llm_cost_usd=total_cost,
+                )
             _log_click_stage("after_normalization", normalized)
 
             normalized = _ensure_screenshots_for_visited_pages(normalized)
@@ -1413,6 +1498,9 @@ async def generate_steps_from_diff(
             "narration": narration,
             "suggested_demo_flow": suggested_demo_flow,
             "llm_cost_usd": total_cost,
+            "ok": True,
+            "generation_hard_fail": False,
+            "generation_soft_fallback": False,
             "generation_context": {
                 "dom_data": dom_data,
                 "diffs_for_prompt": diffs_for_prompt,
@@ -1437,10 +1525,9 @@ async def generate_steps_from_diff(
             f"[steps.step_generation] failed: {type(e).__name__}: {e}",
             flush=True,
         )
-        return {
-            "steps": FALLBACK_STEPS,
-            "narration": fallback_narration,
-            "budget_exceeded": False,
-            "llm_cost_usd": total_cost,
-            "generation_context": None,
-        }
+        return _collapse_result(
+            general_demo=general_demo,
+            narration=fallback_narration,
+            reason=f"Step generation failed: {type(e).__name__}: {e}",
+            llm_cost_usd=total_cost,
+        )

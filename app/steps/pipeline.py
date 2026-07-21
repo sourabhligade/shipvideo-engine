@@ -15,7 +15,7 @@ from app.steps.step_generation import generate_steps_from_diff
 from app.storage import upload_video
 from app.script_pipeline import ScriptPipelineError, run_script_pipeline
 from app.trigger import evaluate_trigger
-from app.steps.metrics import new_run_metrics, write_run_metrics
+from app.steps.metrics import compute_sendable, new_run_metrics, write_run_metrics
 from app.config import load_config
 from observability import pipeline_step
 
@@ -123,17 +123,57 @@ async def analyze_pr(
             general_demo=decision.general_demo,
             contract=contract,
         )
-        steps = flow.get("steps") or [{"action": "screenshot"}]
+        if flow.get("generation_hard_fail") or flow.get("ok") is False:
+            reason = str(
+                flow.get("error")
+                or flow.get("generation_fallback_reason")
+                or "Step generation failed."
+            )
+            return {
+                "ok": False,
+                "error": reason,
+                "steps": [],
+                "narration": flow.get("narration")
+                or "Demo generation failed for this pull request.",
+                "budget_exceeded": flow.get("budget_exceeded", False),
+                "llm_cost_usd": flow.get("llm_cost_usd", 0.0),
+                "generation_context": None,
+                "generation_hard_fail": True,
+                "generation_soft_fallback": False,
+                "generation_fallback_reason": reason,
+            }
+
+        steps = list(flow.get("steps") or [])
+        if not steps:
+            reason = "Step generation produced an empty plan."
+            return {
+                "ok": False,
+                "error": reason,
+                "steps": [],
+                "narration": flow.get("narration")
+                or "Demo generation failed for this pull request.",
+                "budget_exceeded": flow.get("budget_exceeded", False),
+                "llm_cost_usd": flow.get("llm_cost_usd", 0.0),
+                "generation_context": None,
+                "generation_hard_fail": True,
+                "generation_soft_fallback": False,
+                "generation_fallback_reason": reason,
+            }
+
         narration = flow.get("narration") or "Demo screenshot for this pull request."
         budget_exceeded = flow.get("budget_exceeded", False)
         llm_cost_usd = flow.get("llm_cost_usd", 0.0)
         return {
+            "ok": True,
             "steps": steps,
             "narration": narration,
             "budget_exceeded": budget_exceeded,
             "llm_cost_usd": llm_cost_usd,
             "suggested_demo_flow": flow.get("suggested_demo_flow", ""),
             "generation_context": flow.get("generation_context"),
+            "generation_hard_fail": False,
+            "generation_soft_fallback": bool(flow.get("generation_soft_fallback")),
+            "generation_fallback_reason": flow.get("generation_fallback_reason"),
         }
     except ContractIntegrityError:
         raise
@@ -144,11 +184,17 @@ async def analyze_pr(
         )
         import traceback
         traceback.print_exc()
+        reason = f"analyze_pr failed: {type(e).__name__}: {e}"
         return {
-            "steps": [{"action": "screenshot"}],
-            "narration": "Demo screenshot for this pull request (fallback).",
+            "ok": False,
+            "error": reason,
+            "steps": [],
+            "narration": "Demo generation failed for this pull request.",
             "llm_cost_usd": 0.0,
             "generation_context": None,
+            "generation_hard_fail": True,
+            "generation_soft_fallback": False,
+            "generation_fallback_reason": reason,
         }
 
 
@@ -228,13 +274,47 @@ def run_pipeline(
         run_metrics.capture_browser = str(capture_summary.get("capture_browser") or "unknown")
         _apply_capture_metrics()
         run_metrics.success = success
-        run_metrics.video_usable = bool(video_path and video_path.exists() and video_path.stat().st_size > 0)
+        general_demo = bool(
+            generation_context
+            and (
+                generation_context.get("general_demo")
+                or (generation_context.get("extraction") or {}).get("general_demo")
+            )
+        )
+        # Soft generation fallback is also an explicit general/screenshot path
+        if capture_summary.get("generation_soft_fallback"):
+            general_demo = True
+        sendable, proof = compute_sendable(
+            capture_summary,
+            video_path,
+            steps,
+            general_demo=general_demo,
+        )
+        # Never mark usable on failed runs even if a partial file exists
+        if not success:
+            sendable = False
+            if "run_not_success" not in proof.get("reasons", []):
+                proof = dict(proof)
+                reasons = list(proof.get("reasons") or [])
+                reasons.append("run_not_success")
+                proof["reasons"] = reasons
+                proof["sendable"] = False
+        run_metrics.video_usable = sendable
+        run_metrics.sendable = sendable
+        run_metrics.sendable_reasons = list(proof.get("reasons") or [])
+        run_metrics.extra["sendable_proof"] = proof
+        capture_summary["sendable"] = sendable
+        capture_summary["sendable_proof"] = proof
         if error is not None:
             run_metrics.error_type = type(error).__name__
             run_metrics.error_message = str(error)
         run_metrics.finished_at = datetime.now(timezone.utc).isoformat()
         metrics_path = write_run_metrics(run_metrics)
-        print(f"[steps.pipeline] run_metrics file={metrics_path.name}", flush=True)
+        print(
+            f"[steps.pipeline] run_metrics file={metrics_path.name} "
+            f"sendable={sendable} reasons={run_metrics.sendable_reasons}",
+            flush=True,
+        )
 
 
     has_demo_flow = bool(

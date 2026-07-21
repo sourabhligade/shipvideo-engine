@@ -8,7 +8,13 @@ class CaptureSettings:
     viewport_width: int = 1280
     viewport_height: int = 720
     full_page_screenshots: bool = False
+    # When True, demo/debug frames capture full scrollable page (wired into runners).
     full_page_debug_screenshots: bool = True
+
+    @property
+    def effective_full_page(self) -> bool:
+        """Full-page capture if either production or debug full-page is enabled."""
+        return bool(self.full_page_screenshots or self.full_page_debug_screenshots)
 
 
 def load_capture_settings() -> CaptureSettings:

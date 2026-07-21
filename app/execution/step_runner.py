@@ -2116,7 +2116,14 @@ def run_stepwise(
                 step = queue[i]
 
             prev = capture_state(page)
-            ok_exec, shot_idx, err = _execute_one(page, preview_url, step, screenshot_dir, shot_idx, full_page=cs.full_page_screenshots)
+            ok_exec, shot_idx, err = _execute_one(
+                page,
+                preview_url,
+                step,
+                screenshot_dir,
+                shot_idx,
+                full_page=cs.effective_full_page,
+            )
             if not ok_exec:
                 regenerated, attempts = regenerate_with_feedback(
                     objective=objective,

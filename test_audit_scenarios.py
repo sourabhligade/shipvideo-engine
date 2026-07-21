@@ -478,8 +478,11 @@ class Scenario7_TimeoutsAndAV(unittest.TestCase):
 
     def test_frame_hold_uses_next_cue_start(self):
         src = Path("app/product/video.py").read_text()
-        self.assertIn('cues[i + 1]["start"]', src)
+        # Phase 1: holds driven by compute_frame_holds (cue start deltas + audio pad)
+        self.assertIn("compute_frame_holds", src)
+        self.assertIn("build_av_mux_command", src)
         self.assertIn("audio_total", src)
+        self.assertNotIn('"-shortest"', src)
 
 
 # ---------------------------------------------------------------------------
@@ -647,12 +650,22 @@ class Scenario11_RecordRunAfterSuccess(unittest.TestCase):
 
     def test_record_run_after_successful_comment(self):
         src = Path("app/webhook.py").read_text()
-        success_comment = src.find(
-            "comment_on_pr(repo_full_name, pr_number, video_url, extra_note=extra_note)"
+        # Phase 3: only record_run after sendable=True success comment branch
+        self.assertIn("sendable=True", src)
+        rec = src.find("record_run(repo_full_name, pr_number, commit_sha)")
+        self.assertGreater(rec, 0)
+        # record_run must not appear before wait_for_preview_ready
+        wait = src.find("wait_for_preview_ready")
+        self.assertGreater(rec, wait)
+        # not-sendable path must not call record_run in its block
+        not_send = src.find("sendable=False")
+        self.assertGreater(not_send, 0)
+        # the sendable=True branch contains record_run nearby
+        true_branch = src.find("sendable=True")
+        self.assertIn(
+            "record_run(repo_full_name, pr_number, commit_sha)",
+            src[true_branch : true_branch + 250],
         )
-        self.assertGreater(success_comment, 0)
-        after = src[success_comment : success_comment + 200]
-        self.assertIn("record_run(repo_full_name, pr_number, commit_sha)", after)
 
     def test_dual_smart_prefilter_removed(self):
         src = Path("app/webhook.py").read_text()

@@ -336,7 +336,41 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         )
                     return
 
-                steps = flow.get("steps") or [{"action": "screenshot"}]
+                if flow.get("generation_hard_fail") or flow.get("ok") is False:
+                    fail_reason = str(
+                        flow.get("error")
+                        or flow.get("generation_fallback_reason")
+                        or "Step generation failed."
+                    )
+                    print(
+                        f"[webhook] generation hard_fail reason={fail_reason!r}",
+                        flush=True,
+                    )
+                    comment_on_pr(
+                        repo_full_name,
+                        pr_number,
+                        None,
+                        error_message=(
+                            "**Demo video not generated**\n\n"
+                            f"{fail_reason}\n\n"
+                            "No fallback screenshot demo was published for this PR."
+                        ),
+                    )
+                    return
+
+                steps = list(flow.get("steps") or [])
+                if not steps:
+                    comment_on_pr(
+                        repo_full_name,
+                        pr_number,
+                        None,
+                        error_message=(
+                            "**Demo video not generated**\n\n"
+                            "Step generation produced an empty plan."
+                        ),
+                    )
+                    return
+
                 generation_context = flow.get("generation_context")
                 budget_exceeded = flow.get("budget_exceeded", False)
                 run_llm_cost_usd = float(flow.get("llm_cost_usd", 0.0) or 0.0)
@@ -402,9 +436,46 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                     print("[webhook] posting comment to PR", flush=True)
                     extra_note = None
                     if budget_exceeded:
-                        extra_note = "**Monthly budget limit reached.** This demo used fallback steps (no LLM)."
-                    comment_on_pr(repo_full_name, pr_number, video_url, extra_note=extra_note)
-                    record_run(repo_full_name, pr_number, commit_sha)
+                        extra_note = (
+                            "**Monthly budget limit reached.** "
+                            "This demo used a limited generation path."
+                        )
+                    elif flow.get("generation_soft_fallback"):
+                        extra_note = (
+                            "General demo mode: screenshot-only plan "
+                            f"({flow.get('generation_fallback_reason') or 'soft fallback'})."
+                        )
+                    is_sendable = capture_summary.get("sendable")
+                    if is_sendable is None:
+                        approval = capture_summary.get("render_approval") or {}
+                        if "is_sendable" in approval:
+                            is_sendable = bool(approval.get("is_sendable"))
+                        else:
+                            is_sendable = True
+                    sendable_reasons = list(
+                        (capture_summary.get("sendable_proof") or {}).get("reasons")
+                        or (capture_summary.get("render_approval") or {}).get("reasons")
+                        or []
+                    )
+                    if is_sendable is False:
+                        comment_on_pr(
+                            repo_full_name,
+                            pr_number,
+                            video_url,
+                            extra_note=extra_note,
+                            sendable=False,
+                            sendable_reasons=sendable_reasons,
+                        )
+                        # Do not mark run complete as a successful demo
+                    else:
+                        comment_on_pr(
+                            repo_full_name,
+                            pr_number,
+                            video_url,
+                            extra_note=extra_note,
+                            sendable=True,
+                        )
+                        record_run(repo_full_name, pr_number, commit_sha)
                 except Exception as e:
 
                     err_text = f"{type(e).__name__}: {e}"
