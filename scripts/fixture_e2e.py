@@ -41,69 +41,92 @@ class _Handler(SimpleHTTPRequestHandler):
         return
 
 
-def main() -> int:
-    if not FIXTURE_DIR.exists():
-        print(f"Missing fixture dir: {FIXTURE_DIR}", file=sys.stderr)
-        return 2
+FIXTURE_PLAN: list[dict[str, Any]] = [
+    {
+        "action": "click",
+        "selector": "[data-testid='save-settings']",
+        "label": "Save",
+        "validation_condition": {"type": "text_present", "value": "Saved"},
+        "validation_source": "fixture",
+    },
+    {
+        "action": "assert_terminal",
+        "expected_text": "Saved",
+        "expected_element": "[data-testid='save-status']",
+    },
+    {"action": "screenshot", "label": "done"},
+]
 
+FIXTURE_GENERATION_CONTEXT: Dict[str, Any] = {
+    "real_routes": ["/", "/settings.html"],
+    "start_route": "/settings.html",
+    "suggested_demo_flow": "save settings",
+    "changed_testids": ["save-settings", "settings-title", "save-status"],
+}
+
+
+def start_fixture_server() -> tuple[ThreadingHTTPServer, str]:
+    if not FIXTURE_DIR.exists():
+        raise FileNotFoundError(f"Missing fixture dir: {FIXTURE_DIR}")
     port = _free_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    base = f"http://127.0.0.1:{port}"
-    print(f"[fixture_e2e] serving {FIXTURE_DIR} at {base}")
+    return server, f"http://127.0.0.1:{port}"
 
-    # Land on settings via preview_url; only interact (no goto → re-anchor).
-    plan = [
-        {
-            "action": "click",
-            "selector": "[data-testid='save-settings']",
-            "label": "Save",
-        },
-        {
-            "action": "assert_terminal",
-            "expected_text": "Saved",
-            "expected_element": "[data-testid='save-status']",
-        },
-        {"action": "screenshot", "label": "done"},
-    ]
-    generation_context = {
-        "real_routes": ["/", "/settings.html"],
-        "start_route": "/settings.html",
-        "suggested_demo_flow": "save settings",
-        "changed_testids": ["save-settings", "settings-title", "save-status"],
-    }
 
-    shot_dir = OUT_DIR / "shots"
+def _locators_from_runner(runner_result: Dict[str, Any]) -> list[dict[str, Any]]:
+    locators: list[dict[str, Any]] = []
+    for item in runner_result.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        step = item.get("step") if isinstance(item.get("step"), dict) else {}
+        if str(step.get("action") or "") != "click":
+            continue
+        locators.append(
+            {
+                "intent": (item.get("intent") or step.get("label") or "").strip(),
+                "selector": str(step.get("selector") or "").strip(),
+                "chosen_ref": str(item.get("chosen_ref") or "").strip(),
+                "outcome": str(item.get("outcome") or "").strip(),
+            }
+        )
+    return locators
+
+
+def run_fixture_once(
+    *,
+    base_url: str,
+    shot_dir: Path,
+    synthesize_video: bool = True,
+) -> Dict[str, Any]:
+    """Run save-settings → Saved against an already-serving fixture."""
+    import os
+
+    os.environ["BROWSER_BACKEND"] = "playwright"
+    from app.config_types import CaptureSettings
+    from app.execution.step_runner import run_stepwise
+    from app.steps.capture_proof import build_capture_proof
+    from app.steps.metrics import compute_sendable
+
+    plan = list(FIXTURE_PLAN)
+    generation_context = dict(FIXTURE_GENERATION_CONTEXT)
     shot_dir.mkdir(parents=True, exist_ok=True)
     for old in shot_dir.glob("*.png"):
         old.unlink()
 
     report: Dict[str, Any] = {
-        "base_url": base,
+        "base_url": base_url,
         "plan": plan,
         "ok": False,
     }
-
     try:
-        # Prefer stepwise Playwright for deterministic local fixture
-        import os
-
-        os.environ["BROWSER_BACKEND"] = "playwright"
-        # re-import resolution happens at module load — call runner directly
-        from app.config_types import CaptureSettings
-        from app.execution.step_runner import run_stepwise
-        from app.steps.capture_proof import build_capture_proof
-        from app.steps.metrics import compute_sendable
-
-        time.sleep(0.2)
-        # Fixture is a static page: disable major-change re-anchor (needs LLM).
         with __import__("unittest.mock").mock.patch(
             "app.execution.step_runner.detect_major_change",
             return_value=False,
         ):
             runner_result = run_stepwise(
-                preview_url=base + "/settings.html",
+                preview_url=base_url + "/settings.html",
                 initial_steps=plan,
                 objective={
                     "goal": "fixture e2e",
@@ -131,24 +154,26 @@ def main() -> int:
         report["steps_succeeded"] = proof.steps_succeeded
         report["clicks_succeeded"] = proof.clicks_succeeded
         report["gotos_succeeded"] = proof.gotos_succeeded
+        report["locators"] = _locators_from_runner(runner_result)
 
-        # Minimal video file for sendable duration probe (synthetic)
-        fake_video = OUT_DIR / "fixture_out.mp4"
-        # Create a tiny real mp4 via ffmpeg if available
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-loglevel", "error",
-                    "-f", "lavfi", "-i", "color=c=black:s=320x240:d=3",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                    str(fake_video),
-                ],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
-        except Exception as e:
-            report["video_error"] = f"{type(e).__name__}: {e}"
+        fake_video = shot_dir / "fixture_out.mp4"
+        if synthesize_video:
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-f", "lavfi", "-i", "color=c=black:s=320x240:d=3",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        str(fake_video),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=60,
+                )
+            except Exception as e:
+                report["video_error"] = f"{type(e).__name__}: {e}"
+                fake_video.write_bytes(b"\x00" * 50_000)
+        else:
             fake_video.write_bytes(b"\x00" * 50_000)
 
         summary = {
@@ -170,7 +195,6 @@ def main() -> int:
         report["sendable"] = sendable
         report["sendable_proof"] = sendable_proof
 
-        # Pass criteria: navigated/clicked something; proof schema present; no crash
         checks = {
             "has_proof_runner": proof.runner == "playwright",
             "got_or_click": (proof.gotos_succeeded + proof.clicks_succeeded) >= 1
@@ -191,13 +215,26 @@ def main() -> int:
         else:
             report["ok"] = all(checks.values())
             report["strength"] = "schema_smoke" if report["ok"] else "failed"
-
     except Exception as e:
         report["ok"] = False
         report["error"] = f"{type(e).__name__}: {e}"
         import traceback
 
         report["traceback"] = traceback.format_exc()[-2000:]
+    return report
+
+
+def main() -> int:
+    if not FIXTURE_DIR.exists():
+        print(f"Missing fixture dir: {FIXTURE_DIR}", file=sys.stderr)
+        return 2
+
+    server, base = start_fixture_server()
+    print(f"[fixture_e2e] serving {FIXTURE_DIR} at {base}")
+    shot_dir = OUT_DIR / "shots"
+    time.sleep(0.2)
+    try:
+        report = run_fixture_once(base_url=base, shot_dir=shot_dir, synthesize_video=True)
     finally:
         server.shutdown()
 

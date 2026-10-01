@@ -5,6 +5,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app.steps.pipeline import run_pipeline
 from app.steps.step_generation import (
     FALLBACK_STEPS,
     _collapse_result,
@@ -167,6 +168,24 @@ class TestWebhookHardFailNoCapture(unittest.TestCase):
         self.assertEqual(len(comments), 1)
         self.assertIsNone(comments[0]["video"])
         self.assertIn("empty step plan", comments[0]["error"])
+
+
+class TestDiscoveryPlaceholder(unittest.TestCase):
+    def test_screenshot_only_aborts_with_discovery_placeholder(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            run_pipeline(
+                1,
+                "https://example.com",
+                steps=[{"action": "screenshot"}],
+                generation_context={},
+                upload=False,
+            )
+        self.assertIn("discovery_placeholder", str(ctx.exception))
+
+    def test_changed_testid_recovery_is_not_placeholder(self):
+        src = __import__("pathlib").Path("app/steps/pipeline.py").read_text(encoding="utf-8")
+        self.assertIn('failure_reason"] = "discovery_placeholder"', src)
+        self.assertIn("has_changed_testid_recovery", src)
 
 
 if __name__ == "__main__":

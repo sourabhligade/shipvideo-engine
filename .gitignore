@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+doppler.yaml
 *.pem
 *.key
 id_rsa
@@ -36,7 +37,11 @@ git-glimpse/
 app/*.png
 app/data/
 app/screenshots/shot*.png
+app/screenshots/*.mp4
 app/screenshots/out.mp4
+app/screenshots/*/
+data/audit/
+data/locator_history/
 app/screenshots/debug/*.png
 app/screenshots/debug/*.json
 app/screenshots/step_1.png

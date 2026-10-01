@@ -256,6 +256,51 @@ class AgentBrowserCLI:
         print(f"[agent_browser] wait url={expected!r}", flush=True)
         return self._run("wait", "--url", expected, timeout=timeout)
 
+    def wait_for_function(self, expression: str, *, timeout: int = 10) -> CommandResult:
+        expr = (expression or "").strip()
+        if not expr:
+            raise ValueError("expression cannot be empty")
+        print(f"[agent_browser] wait fn={expr!r}", flush=True)
+        return self._run("wait", "--fn", expr, timeout=timeout)
+
+    def get_box(self, ref_or_selector: str) -> Dict[str, float]:
+        target = (ref_or_selector or "").strip()
+        if not target:
+            return {}
+        try:
+            result = self._run("get", "box", target)
+        except AgentBrowserError:
+            return {}
+        data = result.get("data") or {}
+        raw = data.get("box") if isinstance(data.get("box"), dict) else data
+        if not isinstance(raw, dict):
+            return {}
+        box: Dict[str, float] = {}
+        for key in ("x", "y", "width", "height"):
+            try:
+                box[key] = float(raw.get(key))
+            except (TypeError, ValueError):
+                continue
+        return box
+
+    def diff_snapshot(self, *, compact: bool = True) -> Dict[str, Any]:
+        args: List[str] = ["diff", "snapshot"]
+        if compact:
+            args.append("-c")
+        print("[agent_browser] diff snapshot", flush=True)
+        result = self._run(*args)
+        data = result.get("data")
+        if isinstance(data, dict) and data:
+            return data
+        stdout = str(result.get("stdout") or "").strip()
+        return {"stdout": stdout} if stdout else {}
+
+    def annotated_screenshot(self, path: str | Path) -> CommandResult:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[agent_browser] screenshot --annotate path={target}", flush=True)
+        return self._run("screenshot", "--annotate", str(target), json_output=False)
+
     def scroll_into_view(self, ref_or_selector: str) -> CommandResult:
         target = (ref_or_selector or "").strip()
         if not target:

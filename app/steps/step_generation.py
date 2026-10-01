@@ -758,6 +758,7 @@ def _insert_missing_setup_clicks(
             "selector": str(getattr(ref, "selector", "") or ""),
             "text": "",
             "label": str(getattr(ref, "label", "") or "").strip(),
+            "kind": str(getattr(ref, "kind", "") or "cta"),
             "expected_element": "",
         }
         for ref in missing

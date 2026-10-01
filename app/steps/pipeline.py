@@ -13,7 +13,7 @@ from app.manifest import (
     flow_to_steps,
     select_manifest_flow,
 )
-from app.render import render_video
+from app.render import capture_dir_for_run, render_video, video_output_path_for_run
 from app.steps.step_execution import run_capture
 from app.steps.step_generation import generate_steps_from_diff
 from app.storage import upload_video
@@ -349,9 +349,10 @@ def run_pipeline(
 
     if screenshot_only_plan and not has_changed_testid_recovery:
         err = RuntimeError(
-            "Step generation did not produce a sendable proof-backed demo plan. "
-            "Pipeline aborted before capture."
+            "discovery_placeholder: Step generation did not produce a sendable "
+            "proof-backed demo plan. Pipeline aborted before capture."
         )
+        capture_summary["failure_reason"] = "discovery_placeholder"
         _finalize_run_metrics(success=False, error=err)
         raise err
     if screenshot_only_plan and has_changed_testid_recovery:
@@ -361,6 +362,8 @@ def run_pipeline(
             flush=True,
         )
 
+    capture_dir = capture_dir_for_run(run_metrics.run_id)
+
     if use_script_first and has_demo_flow:
         print("[steps.pipeline] trying script-first pipeline", flush=True)
         try:
@@ -368,7 +371,7 @@ def run_pipeline(
                 pr_number=pr_number,
                 preview_url=preview_url,
                 generation_context=generation_context,
-                screenshot_dir=SCREENSHOT_DIR,
+                screenshot_dir=capture_dir,
             )
             video_path = Path(result["video_path"])
             pipeline_used = "script"
@@ -426,7 +429,7 @@ def run_pipeline(
             capture_summary = run_capture(
                 preview_url=preview_url,
                 steps=steps,
-                screenshot_dir=SCREENSHOT_DIR,
+                screenshot_dir=capture_dir,
                 generation_context=generation_context,
             )
             if not capture_summary.get("success", False):
@@ -456,8 +459,16 @@ def run_pipeline(
                     "Stepwise capture produced no validated frames. "
                     "Pipeline aborted before rendering."
                 )
-            render_video(approved_frames, render_approval=render_approval)
-            video_path = SCREENSHOT_DIR / "out.mp4"
+            video_path = video_output_path_for_run(
+                run_metrics.run_id,
+                screenshot_dir=capture_dir,
+            )
+            render_video(
+                approved_frames,
+                render_approval=render_approval,
+                output_path=video_path,
+            )
+            run_metrics.extra["video_path"] = str(video_path)
             pipeline_used = "stepwise"
             capture_summary["pipeline"] = "stepwise"
             capture_summary["pipeline_branch"] = "stepwise"

@@ -403,10 +403,16 @@ def flow_to_steps(flow: ManifestFlow) -> List[Dict[str, Any]]:
                 "value": flow.terminal_condition.value,
             }
 
+        kind = (
+            flow.step_kinds[index]
+            if index < len(flow.step_kinds)
+            else ("amount" if looks_like_amount_chip(label) else "cta")
+        )
         steps.append(
             {
                 "action": "click",
                 "label": label,
+                "kind": kind,
                 "validation_condition": validation,
                 "success_condition": validation,
                 "validation_source": "manifest",

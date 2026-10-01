@@ -197,11 +197,11 @@ class StepRunnerPhase1Tests(unittest.TestCase):
             cli.calls,
             [
                 ("wait_for_load_state", "domcontentloaded", 15),
-                ("wait_for_load_state", "networkidle", AB_NETWORKIDLE_TIMEOUT_S),
                 ("wait_for_text", "Saved", 8),
             ],
         )
-        self.assertTrue(result["networkidle"])
+        self.assertFalse(result["networkidle"])
+        self.assertTrue(result.get("networkidle_skipped"))
         self.assertTrue(result["domcontentloaded"])
         self.assertEqual(result["validation_wait"], "text_present")
         self.assertFalse(result["fallback_wait_used"])
@@ -248,6 +248,7 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         )
         self.assertEqual(result["chosen_ref"], "@e11")
         self.assertEqual(result["selection_source"], "semantic_testid")
+        self.assertEqual(result["candidate_count"], 1)
 
     def test_resolve_ab_click_target_prefers_role_lookup_before_snapshot_matching(self):
         cli = _FakeCLI(found_role_button_ref="@e55")
@@ -274,6 +275,7 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         )
         self.assertEqual(result["chosen_ref"], "@e55")
         self.assertEqual(result["selection_source"], "semantic_role")
+        self.assertEqual(result["candidate_count"], 1)
 
     def test_resolve_ab_click_target_uses_semantic_find_after_command_lookups_miss(self):
         cli = _FakeCLI(found_ref="@e99")
@@ -295,6 +297,7 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         self.assertEqual(result["chosen_ref"], "@e99")
         self.assertEqual(result["selection_reason"], "ab_find")
         self.assertEqual(result["selection_source"], "semantic_find")
+        self.assertEqual(result["candidate_count"], 1)
         self.assertFalse(result["should_retry"])
         self.assertEqual(
             cli.calls,
@@ -337,7 +340,6 @@ class StepRunnerPhase1Tests(unittest.TestCase):
             [
                 ("scroll_into_view", "@e5"),
                 ("wait_for_load_state", "domcontentloaded", 15),
-                ("wait_for_load_state", "networkidle", AB_NETWORKIDLE_TIMEOUT_S),
                 ("is_visible", "@e5"),
                 ("is_enabled", "@e5"),
             ],

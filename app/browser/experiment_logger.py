@@ -471,7 +471,7 @@ class ExperimentLogger:
                 raw_snapshot_path=str(sr.get("raw_snapshot_path") or "").strip(),
                 chosen_ref=(sr.get("chosen_ref") or "").strip(),
                 selection_reason=(sr.get("selection_reason") or "").strip(),
-                candidate_count=0,
+                candidate_count=int(sr.get("candidate_count") or 0),
                 action=(step.get("action") or "").strip(),
                 result=step_result_label,
                 failure_reason=(
