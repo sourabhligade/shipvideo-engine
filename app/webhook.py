@@ -14,7 +14,7 @@ from app.llm_guards import (
 from app.steps.pipeline import analyze_pr, run_pipeline
 from app.steps.pr_extraction import fetch_pr_diff
 from app.preview_url_resolver import get_preview_url, wait_for_preview_ready
-from app.config import load_config
+from app.config import DEFAULT_COMMENT_COMMAND, load_config
 import time
 from observability import init_tracing, pipeline_run_span, print_pipeline_summary, set_current_span_error
 from contextlib import asynccontextmanager
@@ -44,7 +44,8 @@ app.add_middleware(
 )
 
 
-GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "secret")
+def _github_webhook_secret() -> str:
+    return (os.getenv("GITHUB_WEBHOOK_SECRET") or "").strip()
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -103,50 +104,67 @@ def budget_status():
 
 
 def verify_signature(signature, payload):
-    mac = hmac.new(GITHUB_SECRET.encode(), payload, hashlib.sha256)
-    return hmac.compare_digest(f"sha256={mac.hexdigest()}", signature)
+    secret = _github_webhook_secret()
+    if not secret or not signature:
+        return False
+    mac = hmac.new(secret.encode(), payload, hashlib.sha256)
+    expected = f"sha256={mac.hexdigest()}"
+    try:
+        return hmac.compare_digest(expected, str(signature))
+    except Exception:
+        return False
+
+
+def _parse_glimpse_command(comment_body: str, command_prefix: str) -> dict | None:
+    body = (comment_body or "").strip()
+    if not body:
+        return None
+
+    tokens = body.split()
+    cmd_idx = None
+    for i, t in enumerate(tokens):
+        if t == command_prefix or t.startswith(command_prefix):
+            cmd_idx = i
+            break
+    if cmd_idx is None:
+        return None
+
+    force = False
+    route = None
+    remainder: list[str] = []
+
+    i = cmd_idx + 1
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--force":
+            force = True
+        elif t == "--route":
+            if i + 1 < len(tokens):
+                route = tokens[i + 1]
+                i += 1
+        elif t.startswith("--route="):
+            route = t.split("=", 1)[1]
+        elif t.startswith("--"):
+            pass
+        else:
+            remainder.append(t)
+        i += 1
+
+    if route is not None:
+        route = route.strip()
+        if route and not route.startswith("/"):
+            route = "/" + route
+        if route == "":
+            route = None
+
+    return {
+        "force": force,
+        "route": route,
+        "intent_text": " ".join(remainder).strip(),
+    }
 
 @app.post("/webhook")
 async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
-    def _parse_glimpse_command(comment_body: str, command_prefix: str) -> dict | None:
-        body = (comment_body or "").strip()
-        if not body:
-            return None
-
-        tokens = body.split()
-        cmd_idx = None
-        for i, t in enumerate(tokens):
-            if t == command_prefix or t.startswith(command_prefix):
-                cmd_idx = i
-                break
-        if cmd_idx is None:
-            return None
-
-        force = False
-        route = None
-
-        i = cmd_idx + 1
-        while i < len(tokens):
-            t = tokens[i]
-            if t == "--force":
-                force = True
-            elif t == "--route":
-                if i + 1 < len(tokens):
-                    route = tokens[i + 1]
-                    i += 1
-            elif t.startswith("--route="):
-                route = t.split("=", 1)[1]
-            i += 1
-
-        if route is not None:
-            route = route.strip()
-            if route and not route.startswith("/"):
-                route = "/" + route
-            if route == "":
-                route = None
-
-        return {"force": force, "route": route}
-
     def _count_patch_changed_lines(patch: str) -> int:
         plus_minus = 0
         for line in (patch or "").splitlines():
@@ -188,7 +206,8 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
 
     trigger_mode = (trigger_cfg.get("mode") or "auto").lower()
     threshold = int(trigger_cfg.get("threshold") or 5)
-    comment_command = trigger_cfg.get("commentCommand") or "/glimpse"
+    comment_command = trigger_cfg.get("commentCommand") or DEFAULT_COMMENT_COMMAND
+    # skipComment=true means post a skip comment (inverted English; do not rename).
     skip_comment = bool(trigger_cfg.get("skipComment", True))
     include_prefixes = trigger_cfg.get("include") or ["src/", "app/"]
     exclude_substrings = trigger_cfg.get("exclude") or [".test.", ".spec.", "/tests/", "/test/", "__tests__"]
@@ -199,6 +218,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     pr_branch: str | None = None
     commit_sha: str = ""
     start_route: str | None = None
+    intent_text: str = ""
     force: bool = False
     comment_triggered: bool = False
     diff_files: list[dict[str, str]] | None = None
@@ -259,6 +279,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
         force = bool(parsed.get("force", False))
         comment_triggered = True
         start_route = parsed.get("route")
+        intent_text = str(parsed.get("intent_text") or "").strip()
 
 
         token = os.getenv("GITHUB_TOKEN")
@@ -278,7 +299,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
             span.set_attribute("pr_number", pr_number)
             try:
                 print("\n[webhook] === PREVIEW RESOLUTION ===", flush=True)
-                if check_already_ran(repo_full_name, pr_number, commit_sha):
+                if not force and check_already_ran(repo_full_name, pr_number, commit_sha):
                     print("[llm-guards] skipping duplicate run", flush=True)
                     return
 
@@ -314,6 +335,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         staging_url=staging_url,
                         diff_files=diff_files,
                         start_route=start_route,
+                        intent_text=intent_text,
                         force=force,
                         comment_triggered=comment_triggered,
                     )

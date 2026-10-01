@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.config import load_config
-from app.steps.demo_contract import DemoContract, TargetRef, TerminalCondition
+from app.steps.demo_contract import (
+    DemoContract,
+    TargetRef,
+    TerminalCondition,
+    looks_like_amount_chip,
+)
 from app.steps.step_normalizer import _extract_routes_from_diff
 
 
@@ -47,13 +52,25 @@ class ManifestFlow:
     selection_reason: str = ""
     suggested_demo_flow: str = ""
     raw_success: str = ""
+    start_route_aliases: List[str] = field(default_factory=list)
+    step_kinds: List[str] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
+@dataclass
+class ManifestSelection:
+    flow: Optional[ManifestFlow] = None
+    skipped: bool = False
+    reason: str = ""
+    candidates: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ManifestContext:
     pr_title: str = ""
     diff_files: List[Dict[str, str]] = field(default_factory=list)
     start_route: str = ""
+    intent_text: str = ""
+    catalog_tokens: set[str] = field(default_factory=set)
 
 
 def _repo_root() -> Path:
@@ -103,9 +120,11 @@ def _parse_condition_object(raw: Any, *, field_name: str) -> TerminalCondition:
     return TerminalCondition(type=cond_type, value=cond_value)
 
 
-def _parse_manifest_step(step: Any) -> tuple[str, Optional[TerminalCondition]]:
+def _parse_manifest_step(step: Any) -> tuple[str, Optional[TerminalCondition], str]:
     if isinstance(step, str):
-        return _parse_click_label(step), None
+        label = _parse_click_label(step)
+        kind = "amount" if looks_like_amount_chip(label) else "cta"
+        return label, None, kind
     if not isinstance(step, dict):
         raise ValueError(f"manifest step must be a string or object, got {type(step).__name__}")
 
@@ -121,7 +140,10 @@ def _parse_manifest_step(step: Any) -> tuple[str, Optional[TerminalCondition]]:
     parsed_condition = None
     if success_condition is not None:
         parsed_condition = _parse_condition_object(success_condition, field_name="manifest step success_condition")
-    return label, parsed_condition
+    kind = str(step.get("kind") or "").strip().lower()
+    if kind not in {"cta", "option", "toggle", "tab", "amount"}:
+        kind = "amount" if looks_like_amount_chip(label) else "cta"
+    return label, parsed_condition, kind
 
 
 def _parse_terminal_condition(success: Any) -> tuple[TerminalCondition, str]:
@@ -179,12 +201,23 @@ def _load_manifest_flows() -> List[ManifestFlow]:
         if not name:
             raise ValueError("manifest flow missing name")
         start_route = _normalize_route(str(item.get("start") or item.get("start_route") or "/"))
+        raw_aliases = item.get("start_routes") or item.get("start_route_aliases") or []
+        aliases: List[str] = []
+        if isinstance(raw_aliases, list):
+            aliases = [
+                _normalize_route(str(alias))
+                for alias in raw_aliases
+                if str(alias).strip()
+            ]
+        if start_route not in aliases:
+            aliases = [start_route] + aliases
         steps = item.get("steps")
         if not isinstance(steps, list) or not steps:
             raise ValueError(f"manifest flow {name!r} must contain non-empty steps")
         parsed_steps = [_parse_manifest_step(step) for step in steps]
-        click_labels = [label for label, _ in parsed_steps]
-        step_conditions = [condition for _, condition in parsed_steps]
+        click_labels = [label for label, _condition, _kind in parsed_steps]
+        step_conditions = [condition for _label, condition, _kind in parsed_steps]
+        step_kinds = [kind for _label, _condition, kind in parsed_steps]
         terminal_condition, terminal_url = _parse_terminal_condition(item.get("success"))
         suggested_demo_flow = str(item.get("description") or item.get("narration") or "").strip()
         parsed.append(
@@ -197,6 +230,8 @@ def _load_manifest_flows() -> List[ManifestFlow]:
                 terminal_url=terminal_url,
                 suggested_demo_flow=suggested_demo_flow,
                 raw_success=str(item.get("success") or "").strip(),
+                start_route_aliases=aliases,
+                step_kinds=step_kinds,
             )
         )
     return parsed
@@ -211,13 +246,20 @@ def _score_flow(flow: ManifestFlow, ctx: ManifestContext) -> tuple[int, List[str
     title_tokens = _tokens(title)
     flow_name_tokens = _tokens(flow.name)
 
-    if explicit_route and explicit_route == flow.start_route:
+    aliases = list(flow.start_route_aliases) or [flow.start_route]
+    if flow.start_route not in aliases:
+        aliases = [flow.start_route] + aliases
+
+    if explicit_route and explicit_route in aliases:
         score += 10
         reasons.append(f"explicit_start_route={explicit_route}")
 
-    if flow.start_route != "/" and flow.start_route in changed_routes:
+    changed_start = [
+        alias for alias in aliases if alias != "/" and alias in changed_routes
+    ]
+    if changed_start:
         score += 6
-        reasons.append(f"changed_start_route={flow.start_route}")
+        reasons.append(f"changed_start_route={changed_start[0]}")
 
     if flow.terminal_url and flow.terminal_url in changed_routes:
         score += 5
@@ -243,18 +285,56 @@ def _score_flow(flow: ManifestFlow, ctx: ManifestContext) -> tuple[int, List[str
         score += 6
         reasons.append("title_exact_match")
 
+    intent_tokens = _tokens(ctx.intent_text)
+    if intent_tokens and ctx.catalog_tokens:
+        intent_tokens = intent_tokens & ctx.catalog_tokens
+    if intent_tokens:
+        intent_overlap = sorted(intent_tokens & flow_name_tokens)
+        if intent_overlap:
+            score += len(intent_overlap) * 2
+            reasons.append(f"intent_tokens={','.join(intent_overlap)}")
+        if intent_tokens <= flow_name_tokens:
+            score += 6
+            reasons.append("intent_subset_match")
+        intent_l = (ctx.intent_text or "").strip().lower()
+        if normalized_name and (normalized_name in intent_l or intent_l in normalized_name):
+            score += 6
+            reasons.append("intent_name_match")
+
     return score, reasons
 
 
-def get_manifest_flow(pr_context: Dict[str, Any]) -> Optional[ManifestFlow]:
+def _clone_flow(flow: ManifestFlow, *, selection_reason: str) -> ManifestFlow:
+    return ManifestFlow(
+        name=flow.name,
+        start_route=flow.start_route,
+        click_labels=list(flow.click_labels),
+        step_conditions=list(flow.step_conditions),
+        terminal_condition=flow.terminal_condition,
+        terminal_url=flow.terminal_url,
+        selection_reason=selection_reason,
+        suggested_demo_flow=flow.suggested_demo_flow,
+        raw_success=flow.raw_success,
+        start_route_aliases=list(flow.start_route_aliases),
+        step_kinds=list(flow.step_kinds),
+    )
+
+
+def select_manifest_flow(pr_context: Dict[str, Any]) -> ManifestSelection:
     flows = _load_manifest_flows()
     if not flows:
-        return None
+        return ManifestSelection()
+
+    catalog_tokens: set[str] = set()
+    for flow in flows:
+        catalog_tokens |= _tokens(flow.name)
 
     ctx = ManifestContext(
         pr_title=str(pr_context.get("pr_title") or "").strip(),
         diff_files=list(pr_context.get("diff_files") or []),
         start_route=str(pr_context.get("start_route") or "").strip(),
+        intent_text=str(pr_context.get("intent_text") or "").strip(),
+        catalog_tokens=catalog_tokens,
     )
 
     scored: List[tuple[int, ManifestFlow, List[str]]] = []
@@ -267,20 +347,34 @@ def get_manifest_flow(pr_context: Dict[str, Any]) -> Optional[ManifestFlow]:
     second_score = scored[1][0] if len(scored) > 1 else -1
 
     confident = best_score >= 6 and (len(scored) == 1 or best_score >= second_score + 2)
-    if not confident:
-        return None
+    if confident:
+        return ManifestSelection(
+            flow=_clone_flow(
+                best_flow,
+                selection_reason="; ".join(best_reasons) or "manifest_match",
+            )
+        )
 
-    return ManifestFlow(
-        name=best_flow.name,
-        start_route=best_flow.start_route,
-        click_labels=list(best_flow.click_labels),
-        step_conditions=list(best_flow.step_conditions),
-        terminal_condition=best_flow.terminal_condition,
-        terminal_url=best_flow.terminal_url,
-        selection_reason="; ".join(best_reasons) or "manifest_match",
-        suggested_demo_flow=best_flow.suggested_demo_flow,
-        raw_success=best_flow.raw_success,
-    )
+    if ctx.intent_text and best_score >= 6:
+        top = [item[1].name for item in scored[:3] if item[0] > 0]
+        reason = (
+            "Which flow should I record? Comment one of: "
+            + ", ".join(f"`{name}`" for name in top)
+        )
+        return ManifestSelection(
+            skipped=True,
+            reason=reason,
+            candidates=top,
+        )
+
+    return ManifestSelection()
+
+
+def get_manifest_flow(pr_context: Dict[str, Any]) -> Optional[ManifestFlow]:
+    selection = select_manifest_flow(pr_context)
+    if selection.skipped:
+        return None
+    return selection.flow
 
 
 def flow_to_steps(flow: ManifestFlow) -> List[Dict[str, Any]]:
@@ -349,10 +443,26 @@ def flow_to_steps(flow: ManifestFlow) -> List[Dict[str, Any]]:
 
 
 def flow_to_generation_context(flow: ManifestFlow) -> Dict[str, Any]:
+    kinds = list(flow.step_kinds) or [
+        "amount" if looks_like_amount_chip(label) else "cta"
+        for label in flow.click_labels
+    ]
+    setup_steps: List[TargetRef] = []
+    targets: List[TargetRef] = []
+    for index, label in enumerate(flow.click_labels):
+        kind = kinds[index] if index < len(kinds) else "cta"
+        ref = TargetRef(label=label, kind=kind if kind in {"cta", "option", "toggle", "tab", "amount"} else "cta")
+        if ref.kind == "amount":
+            setup_steps.append(ref)
+        else:
+            targets.append(ref)
+    if not targets:
+        targets = [TargetRef(label=label) for label in flow.click_labels]
     contract = DemoContract(
         start_route=flow.start_route,
-        targets=[TargetRef(label=label) for label in flow.click_labels],
+        targets=targets,
         terminal=flow.terminal_condition,
+        setup_steps=setup_steps,
         confidence="high",
         source_static=True,
         extraction_notes=["manifest_flow_selected"],

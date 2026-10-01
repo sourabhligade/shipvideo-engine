@@ -175,6 +175,16 @@ def select_ref(
         )
         _log_result(result)
         return result
+    if len(aria_exact) > 1:
+        result = SelectionResult(
+            chosen_ref="",
+            selection_reason="ambiguous",
+            candidates=[_make_candidate(e, "aria") for e in aria_exact],
+            intent=intent,
+            mode=mode,
+        )
+        _log_result(result)
+        return result
 
     id_exact: List[AgentBrowserElement] = [
         e for e in pool
@@ -185,6 +195,16 @@ def select_ref(
             chosen_ref=id_exact[0]["ref"],
             selection_reason="id_match",
             candidates=[_make_candidate(id_exact[0], "id")],
+            intent=intent,
+            mode=mode,
+        )
+        _log_result(result)
+        return result
+    if len(id_exact) > 1:
+        result = SelectionResult(
+            chosen_ref="",
+            selection_reason="ambiguous",
+            candidates=[_make_candidate(e, "id") for e in id_exact],
             intent=intent,
             mode=mode,
         )

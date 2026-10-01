@@ -10,7 +10,7 @@ from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.steps.dom_crawler import crawl_dom_data
-from app.steps.preflight import preflight_gate
+from app.steps.preflight import _step_matches_ref, preflight_gate
 from app.llm_guards import (
     check_budget,
     estimate_run_cost,
@@ -26,7 +26,7 @@ from app.steps.step_normalizer import (
 )
 from app.steps.diff_budget import budget_diff_files
 from app.config import load_config
-from app.steps.demo_contract import TargetRef
+from app.steps.demo_contract import TargetRef, looks_like_amount_chip
 from observability import pipeline_step
 
 try:
@@ -491,21 +491,29 @@ def _upgrade_contract_from_extraction(
         return contract
 
     existing_targets = list(getattr(contract, "targets", []) or [])
+    existing_setup = list(getattr(contract, "setup_steps", []) or [])
     existing_keys = {
         (getattr(target, "label", "") or "").strip().casefold()
-        for target in existing_targets
+        for target in existing_targets + existing_setup
         if (getattr(target, "label", "") or "").strip()
     }
 
     augmented_targets = list(existing_targets)
+    augmented_setup = list(existing_setup)
     for label in labels:
         key = label.casefold()
         if key in existing_keys:
             continue
         existing_keys.add(key)
-        augmented_targets.append(
-            TargetRef(label=label, selector=_label_to_selector(label))
+        ref = TargetRef(
+            label=label,
+            selector=_label_to_selector(label),
+            kind="amount" if looks_like_amount_chip(label) else "cta",
         )
+        if ref.kind == "amount":
+            augmented_setup.append(ref)
+        else:
+            augmented_targets.append(ref)
 
     extraction_notes = list(getattr(contract, "extraction_notes", []) or [])
     extraction_notes.append("contract_targets_upgraded_from_extraction")
@@ -513,6 +521,7 @@ def _upgrade_contract_from_extraction(
     return replace(
         contract,
         targets=augmented_targets,
+        setup_steps=augmented_setup,
         extraction_notes=extraction_notes,
     )
 
@@ -562,13 +571,19 @@ def _route_snapshot_catalog(
         catalog[route] = {
             "buttons": [
                 {
-                    "text": (btn.get("text") or "").strip(),
+                    "text": (btn.get("text") or btn.get("title") or "").strip(),
+                    "title": (btn.get("title") or "").strip(),
                     "selector": (btn.get("selector") or "").strip(),
                     "testid": (btn.get("testid") or "").strip(),
                     "aria": (btn.get("aria") or "").strip(),
                 }
                 for btn in buttons
-                if (btn.get("text") or btn.get("selector") or "").strip()
+                if (
+                    btn.get("text")
+                    or btn.get("title")
+                    or btn.get("selector")
+                    or ""
+                ).strip()
             ][:20],
             "links": [
                 {
@@ -688,6 +703,68 @@ def _validate_against_route_snapshots(
     return accepted
 
 
+def _insert_missing_setup_clicks(
+    steps: List[Dict[str, Any]],
+    contract: Optional[Any],
+) -> List[Dict[str, Any]]:
+    """Insert grounded setup TargetRefs as clicks before the first CTA."""
+    if contract is None or not steps:
+        return steps
+    setup_refs = [
+        ref
+        for ref in (getattr(contract, "setup_steps", None) or [])
+        if (getattr(ref, "label", "") or "").strip()
+    ]
+    if not setup_refs:
+        return steps
+
+    cta_refs = [
+        target
+        for target in (getattr(contract, "targets", None) or [])
+        if getattr(target, "required", True)
+        and (getattr(target, "label", "") or "").strip()
+    ]
+
+    first_cta_idx = None
+    for idx, step in enumerate(steps):
+        if str(step.get("action") or "") not in {"click", "select", "check"}:
+            continue
+        if cta_refs and any(_step_matches_ref(step, target) for target in cta_refs):
+            first_cta_idx = idx
+            break
+        if not cta_refs:
+            first_cta_idx = idx
+            break
+    if first_cta_idx is None:
+        first_cta_idx = len(steps)
+
+    missing: List[Any] = []
+    prefix = steps[:first_cta_idx]
+    for ref in setup_refs:
+        already = any(
+            str(step.get("action") or "") in {"click", "select", "check"}
+            and _step_matches_ref(step, ref)
+            for step in prefix
+        )
+        if not already:
+            missing.append(ref)
+    if not missing:
+        return steps
+
+    inserted = [
+        {
+            "action": "click",
+            "url": "",
+            "selector": str(getattr(ref, "selector", "") or ""),
+            "text": "",
+            "label": str(getattr(ref, "label", "") or "").strip(),
+            "expected_element": "",
+        }
+        for ref in missing
+    ]
+    return steps[:first_cta_idx] + inserted + steps[first_cta_idx:]
+
+
 def _synthesize_click_steps(
     extraction: Dict[str, Any],
     contract: Optional[Any],
@@ -722,6 +799,7 @@ def _synthesize_click_steps(
             }
         )
 
+    steps = _insert_missing_setup_clicks(steps, contract)
     steps = _inject_terminal_assertion(steps, contract)
     steps = _inject_click_validation_from_terminal(steps, contract)
 
@@ -1335,6 +1413,7 @@ async def generate_steps_from_diff(
                     steps = [goto_step] + steps
 
 
+            steps = _insert_missing_setup_clicks(steps, contract)
             steps = _inject_terminal_assertion(steps, contract)
 
             steps = _inject_click_validation_from_terminal(steps, contract)

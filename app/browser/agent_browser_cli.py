@@ -416,6 +416,56 @@ class AgentBrowserCLI:
             pass
         return ""
 
+    def find_element(self, selector: str) -> str:
+        """Map a CSS selector or testid string onto existing find_* commands.
+
+        Agent Browser has no generic ``find_element`` CLI. Terminal checks pass
+        ``[data-testid='…']`` and ``#id``; resolve those via ``find testid`` /
+        ``find_ref``, and return the selector itself when ``get count`` sees it
+        (``is visible`` accepts a CSS selector).
+        """
+        target = (selector or "").strip()
+        if not target:
+            return ""
+        if re.fullmatch(r"@e\d+", target):
+            return target
+
+        testid_match = re.search(
+            r"\[data-testid=(['\"])([^'\"]+)\1\]",
+            target,
+            flags=re.IGNORECASE,
+        )
+        if testid_match:
+            ref = self.find_testid_ref(testid_match.group(2))
+            if ref:
+                print(
+                    f"[agent_browser] find_element selector={target!r} ref={ref!r}",
+                    flush=True,
+                )
+                return ref
+
+        if target.startswith("#") and len(target) > 1:
+            ident = target[1:].strip()
+            ref = self.find_testid_ref(ident) or self.find_ref(ident)
+            if ref:
+                print(
+                    f"[agent_browser] find_element selector={target!r} ref={ref!r}",
+                    flush=True,
+                )
+                return ref
+
+        try:
+            if self.get_count(target) > 0:
+                print(
+                    f"[agent_browser] find_element selector={target!r} via get_count",
+                    flush=True,
+                )
+                return target
+        except AgentBrowserError:
+            pass
+
+        return self.find_ref(target)
+
     def _extract_ref_from_find_output(self, result: CommandResult) -> str:
 
         data = result.get("data") or {}

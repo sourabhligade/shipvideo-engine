@@ -17,6 +17,7 @@ from app.browser.agent_browser_types import (
     ValidationCondition,
 )
 from app.config_types import CaptureSettings
+from app.steps.demo_contract import looks_like_amount_chip
 from app.context.dom_extractor import extract_dom_context
 from app.dom_schema import ExperimentMode
 from app.execution.navigation_detector import capture_state, detect_major_change, wait_stable_after_navigation
@@ -172,7 +173,7 @@ def _settle_ab_page(
     try:
         cli.wait_for_load_state(
             "networkidle",
-            timeout=min(AB_NETWORKIDLE_TIMEOUT_S, 1),
+            timeout=AB_NETWORKIDLE_TIMEOUT_S,
         )
         settle["networkidle"] = True
     except Exception:
@@ -231,7 +232,7 @@ def _wait_for_ab_element_present(
 
         for selector in selector_candidates:
             try:
-                if cli.get_count(selector) > 0:
+                if cli.get_count(selector) > 0 and cli.is_visible(selector):
                     return True
             except Exception:
                 pass
@@ -1292,6 +1293,60 @@ def _snapshot_has_intent(
     return bool(selected.get("chosen_ref"))
 
 
+_CTA_INTENT_RE = re.compile(
+    r"\b(recharge|proceed|submit|pay|confirm|continue|next|buy|checkout)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_cta_intent(intent: str) -> bool:
+    return bool(_CTA_INTENT_RE.search(intent or ""))
+
+
+def _deterministic_setup_chip_from_snapshot(
+    snap: Dict[str, Any],
+    *,
+    blocked_intent: str,
+    existing_labels: Optional[set[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    seen = {item.casefold() for item in (existing_labels or set()) if item}
+    blocked_l = (blocked_intent or "").strip().casefold()
+    amount_names: List[str] = []
+    role_names: List[str] = []
+    for bucket in ("interactive_elements", "context_elements"):
+        for element in snap.get(bucket) or []:
+            if not isinstance(element, dict):
+                continue
+            name = str(element.get("name") or "").strip()
+            role = str(element.get("role") or "").strip().lower()
+            if not name:
+                continue
+            key = name.casefold()
+            if not key or key == blocked_l or key in seen:
+                continue
+            if looks_like_amount_chip(name):
+                amount_names.append(name)
+                seen.add(key)
+                continue
+            if role in {"radio", "option", "tab"}:
+                role_names.append(name)
+                seen.add(key)
+    chosen = amount_names[0] if amount_names else (role_names[0] if role_names else "")
+    if not chosen:
+        return None
+    proof = {
+        "type": "element_present",
+        "value": blocked_intent,
+    }
+    return {
+        "action": "click",
+        "label": chosen,
+        "validation_condition": dict(proof),
+        "success_condition": dict(proof),
+        "validation_source": "deterministic_setup_recovery",
+    }
+
+
 def _recover_ab_prerequisite_steps(
     *,
     objective: Optional[Dict[str, Any]],
@@ -1324,6 +1379,30 @@ def _recover_ab_prerequisite_steps(
             "blocked_intent": blocked_intent,
             "blocked_target_present": True,
         }
+
+    if _looks_like_cta_intent(blocked_intent):
+        existing_labels = {
+            str(step.get("label") or "").strip()
+            for step in steps[:step_index]
+            if str(step.get("action") or "") in {"click", "select", "check"}
+        }
+        chip_step = _deterministic_setup_chip_from_snapshot(
+            snap_after,
+            blocked_intent=blocked_intent,
+            existing_labels=existing_labels,
+        )
+        if chip_step:
+            retried_step = dict(current_step)
+            retried_step["_ab_recovery_attempted"] = True
+            return {
+                "recovered": True,
+                "attempts_used": 0,
+                "next_intent": next_intent,
+                "blocked_intent": blocked_intent,
+                "blocked_target_present": False,
+                "replacement_steps": [chip_step, retried_step],
+                "recovery_source": "deterministic_setup_chip",
+            }
 
     ab_allowed = _allowed_routes_from_objective(objective)
     ab_dom = _merge_allowed_routes_into_dom_ctx(
@@ -1494,14 +1573,23 @@ def _infer_runtime_validation(
 
     url_before = str(snap_before.get("current_url") or "")
     url_after = str(snap_after.get("current_url") or "")
-    if url_before and url_after and url_before != url_after:
-        condition = {"type": "url_match", "value": url_after}
+    planned_urls = _planned_url_needles(steps, step_index)
+    if url_before and url_after and url_before != url_after and planned_urls:
+        if any(_contains_ci(url_after, needle) for needle in planned_urls):
+            condition = {"type": "url_match", "value": url_after}
+            return StepValidationResult(
+                passed=True,
+                condition=condition,
+                actual=url_after,
+                source="runtime_inferred",
+                failure_reason="",
+            )
         return StepValidationResult(
-            passed=True,
-            condition=condition,
+            passed=False,
+            condition={"type": "url_match", "value": planned_urls[0]},
             actual=url_after,
             source="runtime_inferred",
-            failure_reason="",
+            failure_reason=f"validation_failed:url_match:{planned_urls[0]}",
         )
 
     return StepValidationResult(
@@ -1511,6 +1599,37 @@ def _infer_runtime_validation(
         source="runtime_inferred",
         failure_reason="validation_failed:no_runtime_validation_signal",
     )
+
+
+def _planned_url_needles(steps: List[Dict[str, Any]], step_index: int) -> List[str]:
+    needles: List[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            return
+        seen.add(value)
+        needles.append(value)
+
+    if 0 <= step_index < len(steps):
+        current = steps[step_index]
+        current_cond = _extract_validation_condition(current)
+        if current_cond and current_cond["type"] == "url_match":
+            _add(current_cond["value"])
+        _add(current.get("expected_url"))
+
+    for later in steps[step_index + 1 :]:
+        if str(later.get("action") or "") == "goto":
+            _add(later.get("url"))
+        later_cond = _extract_validation_condition(later)
+        if later_cond and later_cond["type"] == "url_match":
+            _add(later_cond["value"])
+        _add(later.get("expected_url"))
+        raw_condition = later.get("condition") if isinstance(later.get("condition"), dict) else {}
+        if str(raw_condition.get("type") or "").strip() == "url_match":
+            _add(raw_condition.get("value"))
+    return needles
 
 
 def _collect_ab_failure_diagnostics(cli: Any) -> Dict[str, Any]:
@@ -1634,7 +1753,16 @@ def _evaluate_click_validation(
         snapshot_text=str(snap_after.get("snapshot_text") or ""),
         element_names=_element_names(snap_after),
     )
-    passed = after_matches and not before_matches
+    page_changed = _detect_state_change(
+        str(snap_before.get("current_url") or ""),
+        str(snap_after.get("current_url") or ""),
+        str(snap_before.get("snapshot_text") or ""),
+        str(snap_after.get("snapshot_text") or ""),
+    )
+    presence_proof = condition["type"] == "element_present"
+    passed = after_matches and (
+        (not before_matches) or page_changed or presence_proof
+    )
     return StepValidationResult(
         passed=passed,
         condition=condition,
@@ -1775,6 +1903,8 @@ def _terminal_match_in_snapshot(snapshot: Dict[str, Any], expected: str) -> bool
         name = str(element.get("name") or "").strip().lower()
         if needle and needle in name:
             return True
+    if needle in snapshot_text.lower():
+        return True
     return False
 
 
@@ -1921,11 +2051,25 @@ def _assert_ab_terminal_condition(
             except Exception:
                 pass
 
-        terminal_snapshot = extract_snapshot(save_raw=False)
-        found = _terminal_match_in_snapshot(terminal_snapshot, expected)
-        result["found"] = bool(found)
-        result["source"] = "snapshot_visible_elements"
-        result["actual"] = expected if found else ""
+        snapshot_hit = False
+        try:
+            terminal_snapshot = extract_snapshot(save_raw=False)
+            snapshot_hit = _terminal_match_in_snapshot(terminal_snapshot, expected)
+        except Exception as exc:
+            print(
+                f"[terminal_check] snapshot extract failed expected={expected!r} "
+                f"error={type(exc).__name__}: {exc}",
+                flush=True,
+            )
+        print(
+            f"[terminal_check] element_present fail-closed expected={expected!r} "
+            f"snapshot_substring_hit={snapshot_hit}",
+            flush=True,
+        )
+        result["found"] = False
+        result["source"] = "element_present_failed"
+        result["actual"] = expected if snapshot_hit else ""
+        result["snapshot_substring_hit"] = bool(snapshot_hit)
         return result
 
     result["source"] = "missing_terminal_condition"
@@ -2011,6 +2155,7 @@ def _execute_one(
         selector = (step.get("selector") or "").strip()
         text = (step.get("label") or step.get("text") or "").strip()
         validation_condition = _extract_validation_condition(step)
+        loc = None
         if selector:
             loc = page.locator(selector)
             try:
@@ -2021,10 +2166,7 @@ def _execute_one(
                 return False, shot_idx, f"selector_not_found_on_page:{selector}"
             if count > 1:
                 return False, shot_idx, f"selector_not_unique:{selector}:count={count}"
-            loc.first.click(timeout=8000)
-            _wait_for_playwright_validation(page, validation_condition)
-            return True, shot_idx, None
-        if text:
+        elif text:
             loc = page.get_by_text(text, exact=True)
             try:
                 count = loc.count()
@@ -2034,10 +2176,20 @@ def _execute_one(
                 return False, shot_idx, f"label_not_found_on_page:{text}"
             if count > 1:
                 return False, shot_idx, f"label_not_unique:{text}:count={count}"
-            loc.first.click(timeout=8000)
+        else:
+            return False, shot_idx, "missing_click_target"
+        if validation_condition is None:
+            return False, shot_idx, "missing_validation_condition"
+        loc.first.click(timeout=8000)
+        try:
             _wait_for_playwright_validation(page, validation_condition)
-            return True, shot_idx, None
-        return False, shot_idx, "missing_click_target"
+        except Exception:
+            return (
+                False,
+                shot_idx,
+                f"validation_failed:{validation_condition['type']}:{validation_condition['value']}",
+            )
+        return True, shot_idx, None
     if action == "screenshot":
         path = out_dir / f"shot{shot_idx}.png"
         page.screenshot(path=str(path), full_page=full_page)
@@ -2155,7 +2307,12 @@ def run_stepwise(
             _step_latency_ms = int((time.monotonic() - _step_t0) * 1000)           
             step_result = {"index": i, "step": step, "status": "ok", "step_latency_ms": _step_latency_ms}
             action_name = str(step.get("action") or "")
-            if action_name == "screenshot":
+            if action_name == "goto":
+                step_result["outcome"] = "success"
+            elif action_name == "click":
+                step_result["outcome"] = "success"
+                step_result["validation_passed"] = True
+            elif action_name == "screenshot":
                 shot_path = screenshot_dir / f"shot{shot_idx - 1}.png"
                 step_result["screenshot_path"] = str(shot_path)
                 step_result["outcome"] = "success"

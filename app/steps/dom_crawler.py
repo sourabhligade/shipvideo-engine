@@ -255,7 +255,11 @@ def _merge_snapshots(route_snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, An
 
     for _route, ui in route_snapshots.items():
         for btn in (ui.get("buttons") or []):
-            key = (btn.get("testid") or "").strip() or (btn.get("text") or "").lower().strip()
+            key = (
+                (btn.get("testid") or "").strip()
+                or (btn.get("text") or "").lower().strip()
+                or (btn.get("title") or "").lower().strip()
+            )
             if key and key not in seen_btn:
                 seen_btn.add(key)
                 merged_buttons.append(btn)

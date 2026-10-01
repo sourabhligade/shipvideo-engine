@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.steps.pr_extraction import fetch_pr_diff
-from app.manifest import flow_to_generation_context, flow_to_steps, get_manifest_flow
+from app.manifest import (
+    flow_to_generation_context,
+    flow_to_steps,
+    select_manifest_flow,
+)
 from app.render import render_video
 from app.steps.step_execution import run_capture
 from app.steps.step_generation import generate_steps_from_diff
@@ -33,6 +37,7 @@ async def analyze_pr(
     *,
     diff_files: Optional[List[Dict[str, str]]] = None,
     start_route: Optional[str] = None,
+    intent_text: Optional[str] = None,
     force: bool = False,
     comment_triggered: bool = False,
 ) -> Dict[str, Any]:
@@ -88,13 +93,25 @@ async def analyze_pr(
                 "generation_context": None,
             }
 
-        manifest_flow = get_manifest_flow(
+        selection = select_manifest_flow(
             {
                 "pr_title": pr_title or "",
                 "diff_files": diff_files,
                 "start_route": start_route or contract.start_route or "",
+                "intent_text": intent_text or "",
             }
         )
+        if selection.skipped:
+            return {
+                "skipped": True,
+                "reason": selection.reason,
+                "steps": [{"action": "screenshot"}],
+                "narration": "Demo generation skipped for this pull request.",
+                "llm_cost_usd": 0.0,
+                "generation_context": None,
+                "manifest_candidates": list(selection.candidates),
+            }
+        manifest_flow = selection.flow
         if manifest_flow is not None:
             steps = flow_to_steps(manifest_flow)
             print(

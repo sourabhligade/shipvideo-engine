@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.sync_api import Page
 
+from app.steps.step_normalizer import _normalize_route_key
+
 
 
 _PLAYWRIGHT_ENGINE_RE = re.compile(
@@ -16,9 +18,10 @@ _PLAYWRIGHT_ENGINE_RE = re.compile(
 def _known_button_texts(dom_ctx: Dict[str, Any]) -> set:
     known: set = set()
     for b in dom_ctx.get("buttons") or []:
-        t = (b.get("text") or "").strip()
-        if t:
-            known.add(t)
+        for key in ("text", "title"):
+            t = (b.get(key) or "").strip()
+            if t:
+                known.add(t)
     for l in dom_ctx.get("links") or []:
         t = (l.get("text") or "").strip()
         if t:
@@ -95,10 +98,18 @@ def validate_step_against_dom(
             return False, "missing_goto_url"
         # Generation-time multi-route authority (crawl/real_routes) is valid for goto
         # even when the live current-page extractor only lists local links.
-        routes = set(dom_ctx.get("routes") or [])
+        routes = {
+            _normalize_route_key(r) for r in (dom_ctx.get("routes") or [])
+            if _normalize_route_key(r)
+        }
         if allowed_routes:
-            routes |= {str(r).strip() for r in allowed_routes if str(r).strip()}
-        if url not in routes:
+            routes |= {
+                _normalize_route_key(r)
+                for r in allowed_routes
+                if _normalize_route_key(r)
+            }
+        route_key = _normalize_route_key(url)
+        if not route_key or route_key not in routes:
             return False, f"route_not_in_dom:{url}"
         return True, "ok"
 

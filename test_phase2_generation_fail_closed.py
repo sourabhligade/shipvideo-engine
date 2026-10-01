@@ -93,6 +93,7 @@ class TestGenerateStepsFailClosed(unittest.TestCase):
 
 class TestAnalyzePrPropagatesHardFail(unittest.TestCase):
     def test_analyze_pr_empty_plan_not_screenshot(self):
+        from app.manifest import ManifestSelection
         from app.steps.pipeline import analyze_pr
         from app.trigger import TriggerDecision
 
@@ -123,7 +124,8 @@ class TestAnalyzePrPropagatesHardFail(unittest.TestCase):
         ), patch(
             "app.steps.pipeline.evaluate_trigger", return_value=decision
         ), patch(
-            "app.steps.pipeline.get_manifest_flow", return_value=None
+            "app.steps.pipeline.select_manifest_flow",
+            return_value=ManifestSelection(),
         ), patch(
             "app.steps.pipeline.generate_steps_from_diff",
             new=AsyncMock(return_value=fake_flow),

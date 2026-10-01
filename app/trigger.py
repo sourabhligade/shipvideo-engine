@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+from app.config import DEFAULT_COMMENT_COMMAND
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,7 +117,7 @@ def evaluate_trigger(
     trigger_cfg: Dict[str, Any] = config.get("trigger") or {}
     mode: str = (trigger_cfg.get("mode") or "auto").lower()
     threshold: int = int(trigger_cfg.get("threshold") or 5)
-    comment_cmd: str = trigger_cfg.get("commentCommand") or "/demo"
+    comment_cmd: str = trigger_cfg.get("commentCommand") or DEFAULT_COMMENT_COMMAND
 
     matched = [f for f in diff_files if is_ui_file(f.get("path") or "")]
     matched_paths = [f.get("path", "") for f in matched]
