@@ -63,6 +63,23 @@ class BindClickStepTests(unittest.TestCase):
         self.assertTrue(result.skip)
         self.assertEqual(result.reason, "confirm_absent_from_snapshot")
 
+    def test_rebinds_catalog_confirm_to_exact_live_name(self):
+        result = bind_click_step(
+            {"action": "click", "label": "Proceed Recharge"},
+            _snap("₹2000", "Proceed"),
+        )
+        self.assertFalse(result.skip)
+        self.assertEqual(result.step["label"], "Proceed")
+        self.assertEqual(result.step["bound_from"], "snapshot_confirm")
+
+    def test_does_not_bind_unrelated_continue_as_proceed(self):
+        result = bind_click_step(
+            {"action": "click", "label": "Proceed Recharge"},
+            _snap("₹2000", "Continue"),
+        )
+        self.assertTrue(result.skip)
+        self.assertEqual(result.reason, "confirm_absent_from_snapshot")
+
     def test_cta_binds_unique_live_button(self):
         result = bind_click_step(
             {"action": "click", "label": "Pay now", "kind": "cta"},
@@ -99,6 +116,35 @@ class ConfirmProofRebindTests(unittest.TestCase):
             {"type": "text_present", "value": "Recharge Successful"},
         )
         self.assertEqual(result.step["validation_source"], "snapshot_bound_terminal")
+        self.assertIn("Proceed Recharge", result.drop_labels)
+
+    def test_rebinds_missing_proceed_proof_to_live_confirm_name(self):
+        step = {
+            "action": "click",
+            "label": "Recharge Now",
+            "validation_condition": {"type": "element_present", "value": "Proceed Recharge"},
+        }
+        result = resolve_failed_confirm_proof(
+            step,
+            _snap("Recharge Now", "Proceed"),
+            remaining_steps=[{"action": "click", "label": "Proceed Recharge"}],
+        )
+        self.assertEqual(result.step["validation_condition"]["value"], "Proceed")
+        self.assertEqual(result.step["validation_source"], "snapshot_bound_confirm")
+        self.assertEqual(result.drop_labels, [])
+
+    def test_does_not_rebind_proof_to_unrelated_continue(self):
+        step = {
+            "action": "click",
+            "label": "Recharge Now",
+            "validation_condition": {"type": "element_present", "value": "Proceed Recharge"},
+        }
+        result = resolve_failed_confirm_proof(
+            step,
+            _snap("Recharge Now", "Continue"),
+            remaining_steps=[{"action": "click", "label": "Proceed Recharge"}],
+        )
+        self.assertNotEqual(result.step.get("validation_source"), "snapshot_bound_confirm")
         self.assertIn("Proceed Recharge", result.drop_labels)
 
     def test_keeps_proceed_proof_when_confirm_is_visible(self):
@@ -144,7 +190,7 @@ class AmountKindRisingEdgeTests(unittest.TestCase):
         )
         self.assertFalse(result["passed"])
 
-    def test_untyped_amount_keeps_sticky_presence(self):
+    def test_untyped_amount_rejects_sticky_presence(self):
         result = evaluate_click_validation(
             step={
                 "action": "click",
@@ -153,6 +199,53 @@ class AmountKindRisingEdgeTests(unittest.TestCase):
             },
             snap_before=_snap("₹2000", "Recharge Now"),
             snap_after=_snap("₹2000", "Recharge Now"),
+        )
+        self.assertFalse(result["passed"])
+
+    def test_amount_passes_when_chip_becomes_selected(self):
+        before = _snap("₹2000", "Recharge Now")
+        after = _snap("₹2000", "Recharge Now")
+        after["interactive_elements"][0]["pressed"] = True
+        result = evaluate_click_validation(
+            step={
+                "action": "click",
+                "label": "₹2000",
+                "validation_condition": {"type": "element_present", "value": "Recharge Now"},
+            },
+            snap_before=before,
+            snap_after=after,
+        )
+        self.assertTrue(result["passed"])
+
+    def test_amount_passes_when_chip_gains_active_class(self):
+        before = _snap("₹2000", "Recharge Now")
+        after = _snap("₹2000", "Recharge Now")
+        before["interactive_elements"][0]["class"] = "amount-btn"
+        after["interactive_elements"][0]["class"] = "amount-btn active"
+        result = evaluate_click_validation(
+            step={
+                "action": "click",
+                "label": "₹2000",
+                "validation_condition": {"type": "element_present", "value": "Recharge Now"},
+            },
+            snap_before=before,
+            snap_after=after,
+        )
+        self.assertTrue(result["passed"])
+
+    def test_amount_passes_when_recharge_button_becomes_enabled(self):
+        before = _snap("₹2000", "Recharge Now")
+        after = _snap("₹2000", "Recharge Now")
+        before["interactive_elements"][1]["disabled"] = True
+        after["interactive_elements"][1]["disabled"] = False
+        result = evaluate_click_validation(
+            step={
+                "action": "click",
+                "label": "₹2000",
+                "validation_condition": {"type": "element_present", "value": "Recharge Now"},
+            },
+            snap_before=before,
+            snap_after=after,
         )
         self.assertTrue(result["passed"])
 
@@ -183,6 +276,7 @@ class SnapshotHasLabelTests(unittest.TestCase):
     def test_label_match(self):
         self.assertTrue(snapshot_has_label(_snap("Recharge Now"), "Recharge Now"))
         self.assertFalse(snapshot_has_label(_snap("Recharge Now"), "Proceed Recharge"))
+        self.assertFalse(snapshot_has_label(_snap("Proceed"), "Proceed Recharge"))
 
 
 if __name__ == "__main__":

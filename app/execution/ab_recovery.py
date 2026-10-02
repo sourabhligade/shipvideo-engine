@@ -3,12 +3,18 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from app.execution.ab_bind import looks_like_cta_intent, looks_like_confirm_intent
+from app.execution.ab_bind import (
+    bind_click_step,
+    looks_like_cta_intent,
+    looks_like_confirm_intent,
+    used_click_labels,
+)
 from app.execution.ab_proof import (
     evaluate_click_validation,
     extract_validation_condition,
     next_click_intent,
     snapshot_has_intent,
+    stamp_amount_control_state,
 )
 from app.execution.ab_settle import configure_ab_session, settle_ab_page
 from app.execution.ab_target import resolve_ab_click_target
@@ -269,11 +275,20 @@ def replay_ab_milestones(
         if action != "click":
             continue
 
+        snap_before = extract_ab_context(cli, save_raw=False)
+        bind = bind_click_step(
+            step,
+            snap_before,
+            remaining_steps=steps[idx + 1 :],
+            used_labels=used_click_labels(steps, before_index=idx),
+        )
+        if bind.skip:
+            continue
+        step = bind.step
         intent = derive_intent(step)
         if not intent:
             return {"success": False, "error": "replay_missing_intent", "index": idx}
 
-        snap_before = extract_ab_context(cli, save_raw=False)
         resolution = resolve_ab_click_target(
             cli,
             intent=intent,
@@ -291,12 +306,14 @@ def replay_ab_milestones(
                 "intent": intent,
             }
 
+        stamp_amount_control_state(cli, snap_before, step, chip_ref=click_target)
         cli.click(click_target)
         settle_ab_page(
             cli,
             validation_condition=extract_validation_condition(step),
         )
         snap_after = extract_ab_context(cli, save_raw=False)
+        stamp_amount_control_state(cli, snap_after, step)
         validation = evaluate_click_validation(
             step=step,
             snap_before=snap_before,

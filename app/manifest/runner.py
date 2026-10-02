@@ -141,7 +141,7 @@ def _parse_manifest_step(step: Any) -> tuple[str, Optional[TerminalCondition], s
     if success_condition is not None:
         parsed_condition = _parse_condition_object(success_condition, field_name="manifest step success_condition")
     kind = str(step.get("kind") or "").strip().lower()
-    if kind not in {"cta", "option", "toggle", "tab", "amount"}:
+    if kind not in {"cta", "option", "toggle", "tab", "amount", "nav", "confirm"}:
         kind = "amount" if looks_like_amount_chip(label) else "cta"
     return label, parsed_condition, kind
 
@@ -377,6 +377,25 @@ def get_manifest_flow(pr_context: Dict[str, Any]) -> Optional[ManifestFlow]:
     return selection.flow
 
 
+def effective_step_kinds(labels: List[str], kinds: List[str]) -> List[str]:
+    allowed = {"cta", "option", "toggle", "tab", "amount", "nav", "confirm"}
+    normalized: List[str] = []
+    for index, label in enumerate(labels):
+        kind = kinds[index] if index < len(kinds) else ""
+        if kind not in allowed:
+            kind = "amount" if looks_like_amount_chip(label) else "cta"
+        if looks_like_amount_chip(label):
+            kind = "amount"
+        normalized.append(kind)
+    first_amount = next((index for index, kind in enumerate(normalized) if kind == "amount"), None)
+    if first_amount is None:
+        return normalized
+    return [
+        "nav" if index < first_amount and kind == "cta" else kind
+        for index, kind in enumerate(normalized)
+    ]
+
+
 def flow_to_steps(flow: ManifestFlow) -> List[Dict[str, Any]]:
     steps: List[Dict[str, Any]] = [
         {"action": "goto", "url": flow.start_route},
@@ -403,11 +422,7 @@ def flow_to_steps(flow: ManifestFlow) -> List[Dict[str, Any]]:
                 "value": flow.terminal_condition.value,
             }
 
-        kind = (
-            flow.step_kinds[index]
-            if index < len(flow.step_kinds)
-            else ("amount" if looks_like_amount_chip(label) else "cta")
-        )
+        kind = effective_step_kinds(flow.click_labels, flow.step_kinds)[index]
         steps.append(
             {
                 "action": "click",
@@ -449,15 +464,12 @@ def flow_to_steps(flow: ManifestFlow) -> List[Dict[str, Any]]:
 
 
 def flow_to_generation_context(flow: ManifestFlow) -> Dict[str, Any]:
-    kinds = list(flow.step_kinds) or [
-        "amount" if looks_like_amount_chip(label) else "cta"
-        for label in flow.click_labels
-    ]
+    kinds = effective_step_kinds(flow.click_labels, list(flow.step_kinds))
     setup_steps: List[TargetRef] = []
     targets: List[TargetRef] = []
     for index, label in enumerate(flow.click_labels):
         kind = kinds[index] if index < len(kinds) else "cta"
-        ref = TargetRef(label=label, kind=kind if kind in {"cta", "option", "toggle", "tab", "amount"} else "cta")
+        ref = TargetRef(label=label, kind=kind)
         if ref.kind == "amount":
             setup_steps.append(ref)
         else:

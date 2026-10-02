@@ -10,7 +10,12 @@ from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.steps.dom_crawler import crawl_dom_data
-from app.steps.preflight import _step_matches_ref, preflight_gate
+from app.steps.preflight import (
+    _step_matches_ref,
+    action_anchor_refs,
+    ordered_contract_click_labels,
+    preflight_gate,
+)
 from app.llm_guards import (
     check_budget,
     estimate_run_cost,
@@ -324,7 +329,7 @@ def _run_extraction_phase(
                 getattr(contract, "confidence", "low") in ("high", "medium")
                 and getattr(contract, "targets", None)
             ):
-                labels = [t.label for t in contract.targets if t.label]
+                labels = ordered_contract_click_labels(contract)
                 terminal = getattr(contract.terminal, "value", "") if contract.terminal else ""
                 print(
                     "[steps.step_generation] extraction skipped — "
@@ -360,9 +365,7 @@ def _run_extraction_phase(
     contract_hint = ""
     if contract is not None:
         try:
-            existing_labels = [
-                t.label for t in (contract.targets or []) if t.label
-            ]
+            existing_labels = ordered_contract_click_labels(contract)
             if existing_labels:
                 contract_hint = (
                     f"\n\nKnown click targets (confirm or correct these): "
@@ -707,7 +710,7 @@ def _insert_missing_setup_clicks(
     steps: List[Dict[str, Any]],
     contract: Optional[Any],
 ) -> List[Dict[str, Any]]:
-    """Insert grounded setup TargetRefs as clicks before the first CTA."""
+    """Insert setup clicks after leading nav and before the action CTA."""
     if contract is None or not steps:
         return steps
     setup_refs = [
@@ -718,12 +721,7 @@ def _insert_missing_setup_clicks(
     if not setup_refs:
         return steps
 
-    cta_refs = [
-        target
-        for target in (getattr(contract, "targets", None) or [])
-        if getattr(target, "required", True)
-        and (getattr(target, "label", "") or "").strip()
-    ]
+    cta_refs = action_anchor_refs(contract)
 
     first_cta_idx = None
     for idx, step in enumerate(steps):

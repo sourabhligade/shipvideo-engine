@@ -37,19 +37,81 @@ def _step_identity(step: Dict[str, Any]) -> str:
     return (step.get("label") or step.get("selector") or "").strip()
 
 
+def _norm_token(value: str) -> str:
+    return (value or "").strip().casefold()
+
+
+def _ref_kind(ref: Any) -> str:
+    return str(getattr(ref, "kind", "") or "").strip().lower()
+
+
+def _is_nav_ref(ref: Any) -> bool:
+    return _ref_kind(ref) == "nav"
+
+
+def _required_labeled_targets(contract: Any) -> List[Any]:
+    refs: List[Any] = []
+    for target in getattr(contract, "targets", None) or []:
+        if not getattr(target, "required", True):
+            continue
+        if not (getattr(target, "label", "") or "").strip():
+            continue
+        refs.append(target)
+    return refs
+
+
+def leading_nav_refs(contract: Any) -> List[Any]:
+    navs: List[Any] = []
+    for target in _required_labeled_targets(contract):
+        if _is_nav_ref(target):
+            navs.append(target)
+            continue
+        break
+    return navs
+
+
+def action_anchor_refs(contract: Any) -> List[Any]:
+    targets = _required_labeled_targets(contract)
+    action = [target for target in targets if not _is_nav_ref(target)]
+    return action or targets
+
+
+def ordered_contract_click_labels(contract: Any) -> List[str]:
+    navs = [
+        str(getattr(target, "label", "") or "").strip()
+        for target in leading_nav_refs(contract)
+    ]
+    setups = [
+        str(getattr(ref, "label", "") or "").strip()
+        for ref in (getattr(contract, "setup_steps", None) or [])
+        if (getattr(ref, "label", "") or "").strip()
+    ]
+    rest: List[str] = []
+    seen_action = False
+    for target in _required_labeled_targets(contract):
+        label = str(getattr(target, "label", "") or "").strip()
+        if not seen_action and _is_nav_ref(target):
+            continue
+        seen_action = True
+        if label:
+            rest.append(label)
+    return [label for label in navs + setups + rest if label]
+
+
 def _step_matches_ref(step: Dict[str, Any], ref: Any) -> bool:
-    want_label = (getattr(ref, "label", "") or "").strip()
-    want_sel = (getattr(ref, "selector", "") or "").strip()
-    step_label = (step.get("label") or "").strip()
-    step_sel = (step.get("selector") or "").strip()
-    if want_sel and step_sel and want_sel.lower() == step_sel.lower():
+    want_label = _norm_token(getattr(ref, "label", "") or "")
+    want_sel = _norm_token(getattr(ref, "selector", "") or "")
+    step_label = _norm_token(step.get("label") or "")
+    step_sel = _norm_token(step.get("selector") or "")
+    if want_sel and step_sel and want_sel == step_sel:
         return True
-    return (
-        _label_matches(want_label, step_label)
-        or _label_matches(want_label, step_sel)
-        or _label_matches(want_sel, step_label)
-        or _label_matches(want_sel, step_sel)
-    )
+    if want_label and step_label and want_label == step_label:
+        return True
+    if want_label and step_sel and want_label == step_sel:
+        return True
+    if want_sel and step_label and want_sel == step_label:
+        return True
+    return False
 
 
 def _plan_has_likely_chip(steps: List[Dict[str, Any]]) -> bool:
@@ -147,11 +209,7 @@ def preflight_gate(
 
     first_cta_idx = len(setup_action_steps)
     try:
-        cta_refs = [
-            target
-            for target in (contract.targets or [])
-            if getattr(target, "required", True) and (getattr(target, "label", "") or "").strip()
-        ]
+        cta_refs = action_anchor_refs(contract)
         for idx, step in enumerate(setup_action_steps):
             if any(_step_matches_ref(step, target) for target in cta_refs):
                 first_cta_idx = idx
@@ -177,6 +235,33 @@ def preflight_gate(
                 errors.append(
                     f"Required setup step missing before CTA: '{setup_label}'"
                 )
+            setup_idx = next(
+                (
+                    idx
+                    for idx, step in enumerate(setup_action_steps)
+                    if _step_matches_ref(step, setup)
+                ),
+                None,
+            )
+            for nav in leading_nav_refs(contract):
+                nav_label = (getattr(nav, "label", "") or "").strip()
+                nav_idx = next(
+                    (
+                        idx
+                        for idx, step in enumerate(setup_action_steps)
+                        if _step_matches_ref(step, nav)
+                    ),
+                    None,
+                )
+                if nav_idx is None:
+                    errors.append(
+                        f"Required navigation step missing before setup: '{nav_label}'"
+                    )
+                    continue
+                if setup_idx is not None and setup_idx < nav_idx:
+                    errors.append(
+                        f"Setup step '{setup_label}' must follow navigation '{nav_label}'"
+                    )
     except Exception as e:
         warnings.append(f"Could not validate contract setup steps: {e}")
 

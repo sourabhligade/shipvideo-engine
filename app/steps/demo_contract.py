@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import List, Literal, Optional
 
-TargetKind = Literal["cta", "option", "toggle", "tab", "amount"]
+TargetKind = Literal["cta", "option", "toggle", "tab", "amount", "nav", "confirm"]
 
 
 def looks_like_amount_chip(label: str) -> bool:

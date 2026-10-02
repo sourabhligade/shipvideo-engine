@@ -63,6 +63,7 @@
         {
           "action": "click",
           "label": "Settings",
+          "kind": "nav",
           "success_condition": {
             "type": "element_present",
             "value": "₹2000"

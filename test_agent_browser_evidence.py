@@ -91,6 +91,7 @@ class GeometryFallbackTests(unittest.TestCase):
                     {"ref": "@pay", "role": "button", "name": "Pay"},
                 ]
             },
+            intent="Pay",
         )
         self.assertEqual(ref, "@pay")
         self.assertEqual(count, 1)
@@ -104,10 +105,11 @@ class GeometryFallbackTests(unittest.TestCase):
             _Cli(),
             snapshot={
                 "interactive_elements": [
-                    {"ref": "@a", "role": "button", "name": "A"},
-                    {"ref": "@b", "role": "button", "name": "B"},
+                    {"ref": "@a", "role": "button", "name": "Pay"},
+                    {"ref": "@b", "role": "button", "name": "Pay"},
                 ]
             },
+            intent="Pay",
         )
         self.assertEqual(ref, "")
         self.assertEqual(count, 2)
@@ -143,10 +145,9 @@ class GeometryFallbackTests(unittest.TestCase):
             mode="deterministic",
             allow_scroll_retry=False,
         )
-        self.assertEqual(result["chosen_ref"], "@pay")
-        self.assertEqual(result["selection_reason"], "geometry_box")
-        self.assertEqual(result["selection_source"], "geometry")
-        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["chosen_ref"], "@list-order")
+        self.assertEqual(result["selection_reason"], "ab_find")
+        self.assertEqual(result["selection_source"], "semantic_find")
 
 
 class ZeroBoxActionabilityTests(unittest.TestCase):

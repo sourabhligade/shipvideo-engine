@@ -39,6 +39,13 @@ def _webhook():
 
 
 class TestWebhookSecretRequired(unittest.TestCase):
+    def test_startup_requires_secret(self):
+        require_webhook_secret = _webhook().require_webhook_secret
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GITHUB_WEBHOOK_SECRET", None)
+            with self.assertRaises(RuntimeError):
+                require_webhook_secret()
+
     def test_missing_secret_is_invalid(self):
         verify_signature = _webhook().verify_signature
         with patch.dict(os.environ, {}, clear=False):

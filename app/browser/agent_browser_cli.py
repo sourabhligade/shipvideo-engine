@@ -693,6 +693,15 @@ class AgentBrowserCLI:
                 or ""
             ).strip()
             href = str(meta.get("href") or "").strip()
+            pressed = meta.get("pressed")
+            if pressed is None:
+                pressed = meta.get("aria-pressed") or meta.get("ariaPressed")
+            checked = meta.get("checked")
+            if checked is None:
+                checked = meta.get("aria-checked") or meta.get("ariaChecked")
+            disabled = meta.get("disabled")
+            if disabled is None:
+                disabled = meta.get("aria-disabled") or meta.get("ariaDisabled")
             element = AgentBrowserElement(
                 ref=f"@{ref_id}",
                 role=role,
@@ -706,6 +715,15 @@ class AgentBrowserCLI:
                 surface=surface,
                 href=href,
             )
+            if pressed is not None:
+                element["pressed"] = pressed
+            if checked is not None:
+                element["checked"] = checked
+            if disabled is not None:
+                element["disabled"] = disabled
+            css = str(meta.get("class") or meta.get("className") or "").strip()
+            if css:
+                element["class"] = css
             if element["role"] in _INTERACTIVE_ROLES:
                 interactive_elements.append(element)
             else:

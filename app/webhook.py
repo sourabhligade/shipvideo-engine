@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Header, Request
 import hmac, hashlib, json, os, asyncio
+from pathlib import Path
 from threading import Thread
 from app.github_comment import comment_on_pr
 from app.llm_guards import (
@@ -20,8 +21,25 @@ from contextlib import asynccontextmanager
 from github import Github
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def run_summary_path() -> Path:
+    return REPO_ROOT / "data" / "pipeline_run_summary.json"
+
+
+def require_webhook_secret() -> str:
+    secret = _github_webhook_secret()
+    if not secret:
+        raise RuntimeError(
+            "GITHUB_WEBHOOK_SECRET is required. Set it before starting the webhook server."
+        )
+    return secret
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    require_webhook_secret()
     try:
         init_tracing()
     except Exception as e:
@@ -359,39 +377,44 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         generation_context=generation_context,
                     )
 
-                    summary_path = BASE_DIR / "data" / "pipeline_run_summary.json"
-                    summary_path.parent.mkdir(parents=True, exist_ok=True)
-                    _dbg = capture_summary.get("debug") or {}
-                    run_summary = {
-                        "pr_number": pr_number,
-                        "steps_generated": len(steps),
-                        "steps_succeeded": capture_summary["steps_succeeded"],
-                        "steps_failed": capture_summary["steps_failed"],
-                        "failure_reason": capture_summary.get("failure_reason"),
-                        "cost_usd": round(flow.get("llm_cost_usd", 0.0), 4),
-
-                        "video_pipeline": {
-                            "pipeline": capture_summary.get("pipeline"),
-                            "pipeline_branch": capture_summary.get("pipeline_branch"),
-                            "capture_browser": capture_summary.get("capture_browser"),
-                            "capture_path": capture_summary.get("capture_path"),
-                            "agent_browser_used": bool(
-                                capture_summary.get("agent_browser_used", False)
-                            ),
-                            "stepwise_engine": _dbg.get("engine"),
-                            "stepwise_mode": capture_summary.get("mode"),
-                        },
-                    }
-                    with open(summary_path, "w") as f:
-                        json.dump(run_summary, f, indent=2)
-                    print(f"[webhook] run summary file={summary_path.name}", flush=True)
-                    print(
-                        "[webhook] video capture: "
-                        f"branch={run_summary['video_pipeline']['pipeline_branch']!r} "
-                        f"browser={run_summary['video_pipeline']['capture_browser']!r} "
-                        f"agent_browser={run_summary['video_pipeline']['agent_browser_used']}",
-                        flush=True,
-                    )
+                    try:
+                        summary_path = run_summary_path()
+                        summary_path.parent.mkdir(parents=True, exist_ok=True)
+                        _dbg = capture_summary.get("debug") or {}
+                        run_summary = {
+                            "pr_number": pr_number,
+                            "steps_generated": len(steps),
+                            "steps_succeeded": capture_summary["steps_succeeded"],
+                            "steps_failed": capture_summary["steps_failed"],
+                            "failure_reason": capture_summary.get("failure_reason"),
+                            "cost_usd": round(flow.get("llm_cost_usd", 0.0), 4),
+                            "video_pipeline": {
+                                "pipeline": capture_summary.get("pipeline"),
+                                "pipeline_branch": capture_summary.get("pipeline_branch"),
+                                "capture_browser": capture_summary.get("capture_browser"),
+                                "capture_path": capture_summary.get("capture_path"),
+                                "agent_browser_used": bool(
+                                    capture_summary.get("agent_browser_used", False)
+                                ),
+                                "stepwise_engine": _dbg.get("engine"),
+                                "stepwise_mode": capture_summary.get("mode"),
+                            },
+                        }
+                        with open(summary_path, "w") as f:
+                            json.dump(run_summary, f, indent=2)
+                        print(f"[webhook] run summary file={summary_path.name}", flush=True)
+                        print(
+                            "[webhook] video capture: "
+                            f"branch={run_summary['video_pipeline']['pipeline_branch']!r} "
+                            f"browser={run_summary['video_pipeline']['capture_browser']!r} "
+                            f"agent_browser={run_summary['video_pipeline']['agent_browser_used']}",
+                            flush=True,
+                        )
+                    except Exception as summary_exc:
+                        print(
+                            f"[webhook] run summary skipped: {type(summary_exc).__name__}: {summary_exc}",
+                            flush=True,
+                        )
 
                     try:
                         run_budget_status = get_budget_status()

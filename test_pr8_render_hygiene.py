@@ -17,6 +17,17 @@ _TINY_PNG = bytes.fromhex(
 )
 
 
+class TestWebhookSummaryPath(unittest.TestCase):
+    def test_summary_path_is_defined_under_data(self):
+        import app.webhook as webhook
+
+        path = webhook.run_summary_path()
+        self.assertEqual(path.name, "pipeline_run_summary.json")
+        self.assertEqual(path.parent.name, "data")
+        src = Path("app/webhook.py").read_text(encoding="utf-8")
+        self.assertNotIn("BASE_DIR", src)
+
+
 class TestVideoOutputPathForRun(unittest.TestCase):
     def test_uses_run_id_not_shared_out_mp4(self):
         metrics = new_run_metrics(42)
@@ -128,12 +139,15 @@ class TestWebhookRoutesLocked(unittest.TestCase):
         self.assertNotIn("VIDEO_PATH", src)
 
     def test_get_out_mp4_and_budget_are_404(self):
+        import os
+
         from test_pr1_hygiene import _webhook
         from fastapi.testclient import TestClient
 
-        client = TestClient(_webhook().app)
-        video = client.get("/out.mp4")
-        budget = client.get("/budget-status")
+        with patch.dict(os.environ, {"GITHUB_WEBHOOK_SECRET": "test-secret"}, clear=False):
+            client = TestClient(_webhook().app)
+            video = client.get("/out.mp4")
+            budget = client.get("/budget-status")
         self.assertEqual(video.status_code, 404)
         self.assertEqual(budget.status_code, 404)
 

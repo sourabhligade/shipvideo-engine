@@ -11,4 +11,5 @@ else
 fi
 # Ensure chromium for Playwright once
 "$PY" -m playwright install chromium >/dev/null 2>&1 || true
+# Product site listens on 8001 unless PORT is set.
 exec "$UV" app.product_web:app --host 0.0.0.0 --port "${PORT:-8001}" --reload

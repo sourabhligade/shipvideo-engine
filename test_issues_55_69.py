@@ -61,7 +61,7 @@ class _WaitCLI:
 
 
 class Issue55StickyPresenceTests(unittest.TestCase):
-    def test_same_page_element_present_still_passes(self):
+    def test_same_page_element_present_requires_rising_edge(self):
         result = _evaluate_click_validation(
             step={
                 "action": "click",
@@ -69,7 +69,23 @@ class Issue55StickyPresenceTests(unittest.TestCase):
                 "validation_condition": {"type": "element_present", "value": "Recharge Now"},
             },
             snap_before=_snap(url="https://app.example/settings", names=["₹2000", "Recharge Now"]),
-            snap_after=_snap(url="https://app.example/settings", names=["₹2000", "Recharge Now"]),
+            snap_after=_snap(
+                url="https://app.example/settings",
+                text="sheet opened",
+                names=["₹2000", "Recharge Now"],
+            ),
+        )
+        self.assertFalse(result["passed"])
+
+    def test_element_present_passes_when_name_appears(self):
+        result = _evaluate_click_validation(
+            step={
+                "action": "click",
+                "label": "Recharge Now",
+                "validation_condition": {"type": "element_present", "value": "Proceed"},
+            },
+            snap_before=_snap(url="https://app.example/settings", names=["Recharge Now"]),
+            snap_after=_snap(url="https://app.example/settings", names=["Recharge Now", "Proceed"]),
         )
         self.assertTrue(result["passed"])
 

@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from app.steps.demo_contract import looks_like_amount_chip
-from app.steps.preflight import _label_matches
 
 
 CTA_INTENT_RE = re.compile(
@@ -40,6 +39,22 @@ def looks_like_confirm_intent(intent: str) -> bool:
     return bool(CONFIRM_INTENT_RE.search(intent or ""))
 
 
+def _label_tokens(label: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+", (label or "").casefold())
+
+
+def confirm_name_fits(planned: str, live: str) -> bool:
+    planned_tokens = _label_tokens(planned)
+    live_tokens = _label_tokens(live)
+    if not planned_tokens or not live_tokens:
+        return False
+    if planned_tokens == live_tokens:
+        return True
+    if planned_tokens[0] == live_tokens[0]:
+        return True
+    return bool(set(planned_tokens) & set(live_tokens))
+
+
 def snapshot_interactive_names(snapshot: Dict[str, Any]) -> List[str]:
     names: List[str] = []
     seen: set[str] = set()
@@ -59,10 +74,21 @@ def snapshot_interactive_names(snapshot: Dict[str, Any]) -> List[str]:
 
 
 def snapshot_has_label(snapshot: Dict[str, Any], label: str) -> bool:
-    needle = (label or "").strip()
+    needle = (label or "").strip().casefold()
     if not needle:
         return False
-    return any(_label_matches(needle, name) for name in snapshot_interactive_names(snapshot))
+    return any(
+        name.casefold() == needle for name in snapshot_interactive_names(snapshot)
+    )
+
+
+def _confirm_names(snapshot: Dict[str, Any], *, used: Optional[set[str]] = None) -> List[str]:
+    used_names = used or set()
+    return [
+        name
+        for name in snapshot_interactive_names(snapshot)
+        if looks_like_confirm_intent(name) and name.casefold() not in used_names
+    ]
 
 
 def infer_step_kind(step: Dict[str, Any]) -> str:
@@ -134,6 +160,8 @@ def _absent_confirm_labels(remaining: List[Dict[str, Any]], snapshot: Dict[str, 
             continue
         if snapshot_has_label(snapshot, label):
             continue
+        if any(confirm_name_fits(label, name) for name in _confirm_names(snapshot)):
+            continue
         dropped.append(label)
     return dropped
 
@@ -148,9 +176,9 @@ def bind_click_step(
     """Resolve a planned click against the live snapshot.
 
     Exact planned labels that are on the page stay. Missing amount chips bind
-    to a visible unmatched chip. Missing confirm clicks are skipped. Missing
-    next-confirm proof is rebound to the terminal condition so a catalog pin
-    like ``Proceed Recharge`` cannot fail a live page that never grew it.
+    to a visible unmatched chip. A missing confirm binds to one live control
+    whose name shares the planned label, such as Proceed for Proceed Recharge.
+    Any other confirm-like control is left alone and the step is skipped.
     """
     used = {item.casefold() for item in (used_labels or set()) if item}
     bound = dict(step)
@@ -173,8 +201,8 @@ def bind_click_step(
     if kind == "confirm" or looks_like_confirm_intent(planned):
         matches = [
             name
-            for name in snapshot_interactive_names(snapshot)
-            if looks_like_confirm_intent(name) and name.casefold() not in used
+            for name in _confirm_names(snapshot, used=used)
+            if confirm_name_fits(planned, name)
         ]
         if len(matches) == 1:
             bound["label"] = matches[0]
@@ -220,6 +248,20 @@ def resolve_failed_confirm_proof(
         return BindResult(step=dict(step), drop_labels=drop_labels)
     if snapshot_has_label(snap_after, cond_value):
         return BindResult(step=dict(step), drop_labels=drop_labels)
+
+    live_confirms = [
+        name
+        for name in _confirm_names(snap_after)
+        if confirm_name_fits(cond_value, name)
+    ]
+    if len(live_confirms) == 1:
+        updated = dict(step)
+        rebound = {"type": "element_present", "value": live_confirms[0]}
+        updated["validation_condition"] = dict(rebound)
+        updated["success_condition"] = dict(rebound)
+        updated["validation_source"] = "snapshot_bound_confirm"
+        updated["unbound_proof_label"] = cond_value
+        return BindResult(step=updated, drop_labels=drop_labels)
 
     terminal = _terminal_condition_from_remaining(remaining)
     updated = dict(step)

@@ -409,9 +409,10 @@ def run_ab_stepwise(
                             labels=list(attempt_result.get("drop_labels") or []),
                         )
                     if attempt_result.get("skipped"):
-                        outcome = "success"
+                        outcome = "skipped"
                         step_result["skipped"] = True
                         step_result["skip_reason"] = attempt_result.get("skip_reason") or ""
+                        step_result["validation_passed"] = False
                         break
 
                     if attempt_result["retry"]:
@@ -672,6 +673,12 @@ def run_ab_stepwise(
                 _total_retries += max(attempts_used - 1, 0)
                 step_result["outcome"] = outcome
                 step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
+                if outcome == "skipped":
+                    step_result["status"] = "skipped"
+                    step_result["validation_passed"] = False
+                    results.append(step_result)
+                    step_idx += 1
+                    continue
 
 
                 _FATAL_OUTCOMES = frozenset({

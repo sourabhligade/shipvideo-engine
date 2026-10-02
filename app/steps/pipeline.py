@@ -15,6 +15,7 @@ from app.manifest import (
 )
 from app.render import capture_dir_for_run, render_video, video_output_path_for_run
 from app.steps.step_execution import run_capture
+from app.steps.preflight import preflight_gate
 from app.steps.step_generation import generate_steps_from_diff
 from app.storage import upload_video
 from app.script_pipeline import ScriptPipelineError, run_script_pipeline
@@ -114,12 +115,27 @@ async def analyze_pr(
         manifest_flow = selection.flow
         if manifest_flow is not None:
             steps = flow_to_steps(manifest_flow)
+            generation_context = flow_to_generation_context(manifest_flow)
+            preflight = preflight_gate(steps, generation_context.get("contract"))
             print(
                 "[steps.pipeline/analyze_pr] manifest flow selected "
                 f"name={manifest_flow.name!r} reason={manifest_flow.selection_reason!r} "
-                f"steps={len(steps)}",
+                f"steps={len(steps)} preflight_passed={preflight.passed}",
                 flush=True,
             )
+            if not preflight.passed:
+                reason = "; ".join(preflight.errors) or "Manifest plan failed preflight."
+                return {
+                    "ok": False,
+                    "error": reason,
+                    "steps": [],
+                    "narration": "Demo generation failed for this pull request.",
+                    "budget_exceeded": False,
+                    "llm_cost_usd": 0.0,
+                    "generation_context": generation_context,
+                    "generation_hard_fail": True,
+                    "generation_soft_fallback": False,
+                }
             return {
                 "steps": steps,
                 "narration": (
@@ -129,7 +145,7 @@ async def analyze_pr(
                 "budget_exceeded": False,
                 "llm_cost_usd": 0.0,
                 "suggested_demo_flow": manifest_flow.suggested_demo_flow,
-                "generation_context": flow_to_generation_context(manifest_flow),
+                "generation_context": generation_context,
             }
 
         flow = await generate_steps_from_diff(

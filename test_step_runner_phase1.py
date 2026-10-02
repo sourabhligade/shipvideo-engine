@@ -736,6 +736,72 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         result = preflight_gate(steps, contract)
         self.assertTrue(result.passed, result.errors)
 
+    def test_preflight_accepts_nav_then_chip_then_cta(self):
+        contract = DemoContract(
+            start_route="/",
+            targets=[
+                TargetRef(label="Settings", kind="nav"),
+                TargetRef(label="Recharge Now"),
+                TargetRef(label="Proceed Recharge"),
+            ],
+            terminal=TerminalCondition(type="text_present", value="Recharge Successful"),
+            setup_steps=[TargetRef(label="₹2000", kind="amount")],
+            confidence="high",
+        )
+        steps = [
+            {"action": "goto", "url": "/"},
+            {"action": "click", "label": "Settings", "kind": "nav", "validation_condition": {"type": "element_present", "value": "₹2000"}},
+            {"action": "click", "label": "₹2000", "kind": "amount", "validation_condition": {"type": "element_present", "value": "Recharge Now"}},
+            {"action": "click", "label": "Recharge Now", "validation_condition": {"type": "element_present", "value": "Proceed Recharge"}},
+            {"action": "click", "label": "Proceed Recharge", "validation_condition": {"type": "text_present", "value": "Recharge Successful"}},
+            {"action": "assert_terminal", "condition": {"type": "text_present", "value": "Recharge Successful"}},
+        ]
+        result = preflight_gate(steps, contract)
+        self.assertTrue(result.passed, result.errors)
+
+    def test_preflight_rejects_chip_before_settings(self):
+        contract = DemoContract(
+            start_route="/",
+            targets=[
+                TargetRef(label="Settings", kind="nav"),
+                TargetRef(label="Recharge Now"),
+            ],
+            terminal=TerminalCondition(type="text_present", value="done"),
+            setup_steps=[TargetRef(label="₹2000", kind="amount")],
+        )
+        steps = [
+            {"action": "goto", "url": "/"},
+            {"action": "click", "label": "₹2000", "validation_condition": {"type": "element_present", "value": "Recharge Now"}},
+            {"action": "click", "label": "Settings", "kind": "nav", "validation_condition": {"type": "element_present", "value": "₹2000"}},
+            {"action": "click", "label": "Recharge Now", "validation_condition": {"type": "text_present", "value": "done"}},
+            {"action": "assert_terminal", "condition": {"type": "text_present", "value": "done"}},
+        ]
+        result = preflight_gate(steps, contract)
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("must follow navigation 'Settings'" in err for err in result.errors),
+            result.errors,
+        )
+
+    def test_insert_places_chip_after_settings_before_recharge(self):
+        contract = DemoContract(
+            start_route="/",
+            targets=[
+                TargetRef(label="Settings", kind="nav"),
+                TargetRef(label="Recharge Now"),
+            ],
+            terminal=TerminalCondition(type="text_present", value="done"),
+            setup_steps=[TargetRef(label="₹2000", kind="amount")],
+        )
+        steps = [
+            {"action": "goto", "url": "/"},
+            {"action": "click", "label": "Settings", "kind": "nav"},
+            {"action": "click", "label": "Recharge Now"},
+        ]
+        out = _insert_missing_setup_clicks(steps, contract)
+        clicks = [s.get("label") for s in out if s.get("action") == "click"]
+        self.assertEqual(clicks, ["Settings", "₹2000", "Recharge Now"])
+
     def test_insert_missing_setup_clicks_on_cta_only_plan(self):
         contract = DemoContract(
             start_route="/settings",

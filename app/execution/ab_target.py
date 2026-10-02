@@ -117,18 +117,23 @@ def unique_visible_role_ref(
     cli: Any,
     *,
     snapshot: Dict[str, Any],
+    intent: str = "",
 ) -> tuple[str, int]:
-    """Unique on-screen button/link by get_box. Never snapshot list order."""
+    """Unique visible button or link whose accessible name equals intent."""
     get_box = getattr(cli, "get_box", None)
-    if not callable(get_box):
+    needle = (intent or "").strip().casefold()
+    if not needle or not callable(get_box):
         return "", 0
 
-    visible_by_role: Dict[str, List[str]] = {"button": [], "link": []}
+    matched: List[str] = []
     for element in snapshot.get("interactive_elements") or []:
         if not isinstance(element, dict):
             continue
         role = str(element.get("role") or "").strip().lower()
-        if role not in visible_by_role:
+        if role not in {"button", "link"}:
+            continue
+        name = str(element.get("name") or "").strip().casefold()
+        if name != needle:
             continue
         ref = str(element.get("ref") or "").strip()
         if not ref:
@@ -141,16 +146,11 @@ def unique_visible_role_ref(
         height = float(box.get("height") or 0)
         if width <= 0 or height <= 0:
             continue
-        visible_by_role[role].append(ref)
+        matched.append(ref)
 
-    buttons = visible_by_role["button"]
-    links = visible_by_role["link"]
-    visible_count = len(buttons) + len(links)
-    if len(buttons) == 1 and not links:
-        return buttons[0], visible_count
-    if len(links) == 1 and not buttons:
-        return links[0], visible_count
-    return "", visible_count
+    if len(matched) == 1:
+        return matched[0], 1
+    return "", len(matched)
 
 
 def resolve_ab_click_target(
@@ -232,7 +232,7 @@ def resolve_ab_click_target(
         })
         return resolved
 
-    geo_ref, geo_count = unique_visible_role_ref(cli, snapshot=snapshot)
+    geo_ref, geo_count = unique_visible_role_ref(cli, snapshot=snapshot, intent=intent)
     if geo_count:
         resolved["candidate_count"] = max(int(resolved.get("candidate_count") or 0), geo_count)
     if geo_ref:

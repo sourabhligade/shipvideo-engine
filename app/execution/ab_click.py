@@ -104,8 +104,10 @@ def _run_ab_click_attempt(
     if bind.skip:
         result["skipped"] = True
         result["skip_reason"] = bind.reason
-        result["outcome"] = "success"
+        result["outcome"] = "skipped"
         step_result["skipped"] = True
+        step_result["outcome"] = "skipped"
+        step_result["validation_passed"] = False
         step_result["skip_reason"] = bind.reason
         step_result["intent"] = str(step.get("label") or step_result.get("intent") or "")
         _log(
@@ -218,6 +220,10 @@ def _run_ab_click_attempt(
         return result
     result["shot_idx"] = shot_idx
 
+    from app.execution.ab_proof import stamp_amount_control_state
+
+    stamp_amount_control_state(cli, snap, step, chip_ref=click_target)
+
     try:
         cli.click(click_target)
     except Exception as exc:
@@ -265,6 +271,9 @@ def _run_ab_click_attempt(
     result["shot_idx"] = shot_idx
 
     snap_after = extract_snapshot(save_raw=False)
+    from app.execution.ab_proof import stamp_amount_control_state
+
+    stamp_amount_control_state(cli, snap_after, step)
     result["snap_after"] = snap_after
     url_before = snap["current_url"]
     url_after = snap_after["current_url"]
@@ -301,7 +310,10 @@ def _run_ab_click_attempt(
         )
         if rebound.drop_labels:
             result["drop_labels"] = list(rebound.drop_labels)
-        if rebound.step.get("validation_source") == "snapshot_bound_terminal":
+        if rebound.step.get("validation_source") in {
+            "snapshot_bound_terminal",
+            "snapshot_bound_confirm",
+        }:
             step = rebound.step
             result["bound_step"] = step
             step_result["step"] = step
