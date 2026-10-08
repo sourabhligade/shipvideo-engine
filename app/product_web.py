@@ -145,4 +145,4 @@ def api_job_frame(job_id: str, name: str) -> FileResponse:
 
 
 # Also expose legacy webhook app routes optionally via mount is not done here;
-# run product site with: uvicorn app.product_web:app --reload --port 8080
+# run product site with: uvicorn app.product_web:app --reload --port 8001

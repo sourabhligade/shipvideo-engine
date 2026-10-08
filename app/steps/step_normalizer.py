@@ -1,7 +1,6 @@
-
-
 import re
 from typing import Any, Dict, List, Optional, Set
+from urllib.parse import urlparse
 
 
 VALID_ACTIONS = {"goto", "click", "screenshot", "assert_terminal"}
@@ -15,6 +14,9 @@ _PASSTHROUGH_FIELDS = (
     "expected_url",
     "expected_testid",
     "terminal",
+    "kind",
+    "planned_label",
+    "bound_from",
 )
 
 
@@ -38,6 +40,19 @@ def _is_stable_selector(selector: str) -> bool:
     if not s:
         return False
     return bool(_STABLE_SELECTOR_RE.match(s))
+
+
+def _normalize_route_key(url: str) -> str:
+    value = (url or "").strip()
+    if not value:
+        return ""
+    if value.startswith("http://") or value.startswith("https://"):
+        value = urlparse(value).path or "/"
+    if not value.startswith("/"):
+        value = "/" + value
+    if len(value) > 1:
+        value = value.rstrip("/")
+    return value or "/"
 
 
 def validate_steps(steps: Any) -> List[Dict[str, Any]]:
@@ -175,11 +190,17 @@ def validate_against_dom(
 
 
 
-    valid_routes: Set[str] = set(dom_data.get("routes") or ["/"])
+    valid_routes: Set[str] = {
+        _normalize_route_key(route) for route in (dom_data.get("routes") or ["/"])
+        if _normalize_route_key(route)
+    }
     valid_routes.add("/")
 
     if allowed_routes_override:
-        valid_routes = set(allowed_routes_override) | {"/"}
+        valid_routes = {
+            _normalize_route_key(route) for route in allowed_routes_override
+            if _normalize_route_key(route)
+        } | {"/"}
 
     valid_selectors: Set[str] = set()
     valid_texts: Set[str] = set()
@@ -189,12 +210,13 @@ def validate_against_dom(
         if sel:
             valid_selectors.add(sel)
 
-        txt = (btn.get("text") or "").strip()
-        if txt:
-            valid_texts.add(txt)
+        for key in ("text", "title"):
+            txt = (btn.get(key) or "").strip()
+            if txt:
+                valid_texts.add(txt)
 
     for link in dom_data.get("links") or []:
-        href = (link.get("href") or "").strip()
+        href = _normalize_route_key((link.get("href") or "").strip())
         if href:
             valid_routes.add(href)
 
@@ -208,7 +230,11 @@ def validate_against_dom(
             valid_selectors.add(f"[data-testid='{testid}']")
 
     if diff_files:
-        inferred = _extract_routes_from_diff(diff_files)
+        inferred = {
+            _normalize_route_key(route)
+            for route in _extract_routes_from_diff(diff_files)
+            if _normalize_route_key(route)
+        }
         if allowed_routes_override:
             valid_routes |= inferred & valid_routes
         else:
@@ -253,7 +279,8 @@ def validate_against_dom(
 
         if action == "goto":
             url = (step.get("url") or "").strip()
-            if url and url in valid_routes:
+            route_key = _normalize_route_key(url)
+            if route_key and route_key in valid_routes:
                 accepted.append(step)
             else:
                 print(

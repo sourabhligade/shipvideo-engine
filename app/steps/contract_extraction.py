@@ -3,7 +3,13 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional, Set, Tuple
 
-from app.steps.demo_contract import DemoContract, TargetRef, TerminalCondition
+from app.steps.demo_contract import (
+    DemoContract,
+    TargetKind,
+    TargetRef,
+    TerminalCondition,
+    looks_like_amount_chip,
+)
 from app.steps.step_normalizer import _extract_routes_from_diff
 
 
@@ -11,7 +17,7 @@ def extract_contract_static(
     diff_files: List[Dict[str, str]],
 ) -> DemoContract:
     start_route = _infer_start_route(diff_files)
-    targets = _extract_targets(diff_files)
+    targets, setup_steps = _extract_targets_and_setup(diff_files)
     terminal = _detect_terminal(diff_files)
     interaction_hints = _extract_interaction_hints(diff_files)
 
@@ -25,6 +31,10 @@ def extract_contract_static(
         notes.append("no_terminal_detected")
     for confidence, hint in interaction_hints:
         notes.append(f"interaction_hint_{confidence}:{hint}")
+    if setup_steps:
+        notes.append(
+            "setup_steps:" + ",".join(ref.label for ref in setup_steps if ref.label)
+        )
 
     has_route = bool(start_route and start_route != "/")
     has_targets = bool(targets)
@@ -32,11 +42,16 @@ def extract_contract_static(
     confidence = "high" if (has_route and has_targets and has_terminal) else (
         "medium" if ((has_route and has_targets) or (has_targets and has_terminal)) else "low"
     )
+    high_setup_hints = any(level == "high" for level, _ in interaction_hints)
+    if high_setup_hints and not setup_steps and confidence == "high":
+        confidence = "medium"
+        notes.append("setup_hint_ungrounded_confidence_capped")
 
     return DemoContract(
         start_route=start_route,
         targets=targets,
         terminal=terminal,
+        setup_steps=setup_steps,
         confidence=confidence,
         source_static=True,
         extraction_notes=notes,
@@ -51,8 +66,17 @@ def _infer_start_route(diff_files: List[Dict[str, str]]) -> str:
 
 
 def _extract_targets(diff_files: List[Dict[str, str]]) -> List[TargetRef]:
+    targets, _setup = _extract_targets_and_setup(diff_files)
+    return targets
+
+
+def _extract_targets_and_setup(
+    diff_files: List[Dict[str, str]],
+) -> Tuple[List[TargetRef], List[TargetRef]]:
     targets: List[TargetRef] = []
-    seen_labels: Set[str] = set()
+    setup_steps: List[TargetRef] = []
+    seen_targets: Set[str] = set()
+    seen_setup: Set[str] = set()
 
     for f in diff_files:
         patch = f.get("patch", "")
@@ -63,26 +87,56 @@ def _extract_targets(diff_files: List[Dict[str, str]]) -> List[TargetRef]:
                 continue
 
             normalized_line = line[1:]
+            line_selector = ""
 
             for m in re.finditer(r'data-testid=["\']([^"\']+)["\']', line):
                 tid = m.group(1)
+                line_selector = f"[data-testid='{tid}']"
                 label = tid.replace("-", " ").replace("_", " ")
-                _append_target(
+                _append_ref(
                     targets,
-                    seen_labels,
+                    setup_steps,
+                    seen_targets,
+                    seen_setup,
                     label=label,
-                    selector=f"[data-testid='{tid}']",
+                    selector=line_selector,
+                    line=normalized_line,
                 )
 
             for label in _extract_string_targets_from_line(normalized_line):
-                _append_target(targets, seen_labels, label=label)
+                _append_ref(
+                    targets,
+                    setup_steps,
+                    seen_targets,
+                    seen_setup,
+                    label=label,
+                    selector=line_selector,
+                    line=normalized_line,
+                )
 
-            if not _line_looks_interactive(line):
-                continue
-            for label in _extract_interactive_targets_from_line(normalized_line):
-                _append_target(targets, seen_labels, label=label)
+            if _line_looks_interactive(line):
+                for label in _extract_interactive_targets_from_line(normalized_line):
+                    _append_ref(
+                        targets,
+                        setup_steps,
+                        seen_targets,
+                        seen_setup,
+                        label=label,
+                        selector=line_selector,
+                        line=normalized_line,
+                    )
+                for label in _extract_amount_chips_from_line(normalized_line):
+                    _append_ref(
+                        targets,
+                        setup_steps,
+                        seen_targets,
+                        seen_setup,
+                        label=label,
+                        selector=line_selector,
+                        line=normalized_line,
+                    )
 
-    return targets
+    return targets, setup_steps
 
 
 def _detect_terminal(diff_files: List[Dict[str, str]]) -> Optional[TerminalCondition]:
@@ -162,9 +216,63 @@ def _extract_interaction_hints(diff_files: List[Dict[str, str]]) -> List[Tuple[s
 def _line_looks_interactive(line: str) -> bool:
     return bool(
         re.search(r"<\s*(button|a)\b", line, re.IGNORECASE)
-        or re.search(r'role=["\'](button|link|tab|menuitem)["\']', line, re.IGNORECASE)
-        or re.search(r"<\s*[A-Za-z0-9_.:-]*(Button|Link|Tab|Checkbox|Radio)\b", line)
+        or re.search(
+            r'role=["\'](button|link|tab|menuitem|radio|option|switch|checkbox)["\']',
+            line,
+            re.IGNORECASE,
+        )
+        or re.search(
+            r"<\s*[A-Za-z0-9_.:-]*(Button|Link|Tab|Checkbox|Radio|Option)\b",
+            line,
+        )
     )
+
+
+def _infer_kind(label: str, selector: str, line: str) -> TargetKind:
+    sel = (selector or "").lower()
+    ln = (line or "").lower()
+    if looks_like_amount_chip(label) or "amount" in sel:
+        return "amount"
+    if re.search(r'role=["\']tab["\']', ln) or re.search(r"\btab\b", sel):
+        return "tab"
+    if re.search(r'role=["\'](switch|checkbox)["\']', ln) or "toggle" in sel:
+        return "toggle"
+    if re.search(r'role=["\'](radio|option)["\']', ln):
+        return "option"
+    return "cta"
+
+
+def _append_ref(
+    targets: List[TargetRef],
+    setup_steps: List[TargetRef],
+    seen_targets: Set[str],
+    seen_setup: Set[str],
+    *,
+    label: str,
+    selector: str = "",
+    line: str = "",
+) -> None:
+    cleaned = _clean_target_label(label)
+    if not cleaned:
+        return
+    kind = _infer_kind(cleaned, selector, line)
+    dest = setup_steps if kind != "cta" else targets
+    seen = seen_setup if kind != "cta" else seen_targets
+    key = cleaned.casefold()
+
+    if kind != "cta" and selector:
+        kept: List[TargetRef] = []
+        for existing in dest:
+            if existing.selector == selector and existing.label.casefold() != key:
+                seen.discard(existing.label.casefold())
+                continue
+            kept.append(existing)
+        dest[:] = kept
+
+    if key in seen:
+        return
+    seen.add(key)
+    dest.append(TargetRef(label=cleaned, selector=selector, kind=kind))
 
 
 def _append_target(
@@ -174,19 +282,23 @@ def _append_target(
     label: str,
     selector: str = "",
 ) -> None:
-    cleaned = _clean_target_label(label)
-    if not cleaned:
-        return
-    key = cleaned.casefold()
-    if key in seen_labels:
-        return
-    seen_labels.add(key)
-    targets.append(TargetRef(label=cleaned, selector=selector))
+    dummy_setup: List[TargetRef] = []
+    seen_setup: Set[str] = set()
+    _append_ref(
+        targets,
+        dummy_setup,
+        seen_labels,
+        seen_setup,
+        label=label,
+        selector=selector,
+    )
 
 
 def _clean_target_label(label: str) -> str:
     cleaned = re.sub(r"\s+", " ", (label or "").strip())
     cleaned = cleaned.strip("(){}[]:,.;")
+    if looks_like_amount_chip(cleaned) and len(cleaned) >= 2:
+        return cleaned
     if len(cleaned) < 3 or len(cleaned.split()) > 6:
         return ""
     if not re.search(r"[A-Za-z]", cleaned):
@@ -198,6 +310,15 @@ def _clean_target_label(label: str) -> str:
     }:
         return ""
     return cleaned
+
+
+def _extract_amount_chips_from_line(line: str) -> List[str]:
+    labels: List[str] = []
+    for m in re.finditer(r"[₹$€£¥]\s?\d[\d,]*(?:\.\d+)?", line):
+        cleaned = _clean_target_label(m.group(0))
+        if cleaned:
+            labels.append(cleaned)
+    return labels
 
 
 def _extract_interactive_targets_from_line(line: str) -> List[str]:

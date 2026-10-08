@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from app.steps.demo_contract import looks_like_amount_chip
+
 
 @dataclass
 class PreflightResult:
@@ -12,6 +14,113 @@ class PreflightResult:
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     action: str = "proceed"                                      
+
+
+_SETUP_ACTIONS = {"click", "select", "check"}
+
+
+def _label_matches(expected: str, candidate: str) -> bool:
+    a = (expected or "").strip().lower()
+    b = (candidate or "").strip().lower()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if len(a) > 4 and a in b:
+        return True
+    if len(b) > 4 and b in a:
+        return True
+    return False
+
+
+def _step_identity(step: Dict[str, Any]) -> str:
+    return (step.get("label") or step.get("selector") or "").strip()
+
+
+def _norm_token(value: str) -> str:
+    return (value or "").strip().casefold()
+
+
+def _ref_kind(ref: Any) -> str:
+    return str(getattr(ref, "kind", "") or "").strip().lower()
+
+
+def _is_nav_ref(ref: Any) -> bool:
+    return _ref_kind(ref) == "nav"
+
+
+def _required_labeled_targets(contract: Any) -> List[Any]:
+    refs: List[Any] = []
+    for target in getattr(contract, "targets", None) or []:
+        if not getattr(target, "required", True):
+            continue
+        if not (getattr(target, "label", "") or "").strip():
+            continue
+        refs.append(target)
+    return refs
+
+
+def leading_nav_refs(contract: Any) -> List[Any]:
+    navs: List[Any] = []
+    for target in _required_labeled_targets(contract):
+        if _is_nav_ref(target):
+            navs.append(target)
+            continue
+        break
+    return navs
+
+
+def action_anchor_refs(contract: Any) -> List[Any]:
+    targets = _required_labeled_targets(contract)
+    action = [target for target in targets if not _is_nav_ref(target)]
+    return action or targets
+
+
+def ordered_contract_click_labels(contract: Any) -> List[str]:
+    navs = [
+        str(getattr(target, "label", "") or "").strip()
+        for target in leading_nav_refs(contract)
+    ]
+    setups = [
+        str(getattr(ref, "label", "") or "").strip()
+        for ref in (getattr(contract, "setup_steps", None) or [])
+        if (getattr(ref, "label", "") or "").strip()
+    ]
+    rest: List[str] = []
+    seen_action = False
+    for target in _required_labeled_targets(contract):
+        label = str(getattr(target, "label", "") or "").strip()
+        if not seen_action and _is_nav_ref(target):
+            continue
+        seen_action = True
+        if label:
+            rest.append(label)
+    return [label for label in navs + setups + rest if label]
+
+
+def _step_matches_ref(step: Dict[str, Any], ref: Any) -> bool:
+    want_label = _norm_token(getattr(ref, "label", "") or "")
+    want_sel = _norm_token(getattr(ref, "selector", "") or "")
+    step_label = _norm_token(step.get("label") or "")
+    step_sel = _norm_token(step.get("selector") or "")
+    if want_sel and step_sel and want_sel == step_sel:
+        return True
+    if want_label and step_label and want_label == step_label:
+        return True
+    if want_label and step_sel and want_label == step_sel:
+        return True
+    if want_sel and step_label and want_sel == step_label:
+        return True
+    return False
+
+
+def _plan_has_likely_chip(steps: List[Dict[str, Any]]) -> bool:
+    for step in steps:
+        if str(step.get("action") or "") not in _SETUP_ACTIONS:
+            continue
+        if looks_like_amount_chip(_step_identity(step)):
+            return True
+    return False
 
 
 def _parse_interaction_hints(contract: Any) -> Dict[str, List[str]]:
@@ -74,29 +183,22 @@ def preflight_gate(
 
 
     click_steps = [s for s in steps if s.get("action") == "click"]
-    click_labels_lower = [
-        (s.get("label") or s.get("selector") or "").lower()
-        for s in click_steps
+    setup_action_steps = [
+        s for s in steps if str(s.get("action") or "") in _SETUP_ACTIONS
     ]
     interaction_hints = _parse_interaction_hints(contract)
+    setup_refs = list(getattr(contract, "setup_steps", None) or [])
 
     try:
         for target in contract.targets or []:
             if not getattr(target, "required", True):
                 continue
 
-            target_label = (target.label or "").strip().lower()
+            target_label = (target.label or "").strip()
             if not target_label:
                 continue
 
-
-
-            matched = any(
-                target_label == cl
-                or (len(target_label) > 4 and target_label in cl)
-                or (len(cl) > 4 and cl in target_label)
-                for cl in click_labels_lower
-            )
+            matched = any(_step_matches_ref(step, target) for step in click_steps)
 
             if not matched:
                 errors.append(
@@ -104,6 +206,64 @@ def preflight_gate(
                 )
     except Exception as e:
         warnings.append(f"Could not validate contract targets: {e}")
+
+    first_cta_idx = len(setup_action_steps)
+    try:
+        cta_refs = action_anchor_refs(contract)
+        for idx, step in enumerate(setup_action_steps):
+            if any(_step_matches_ref(step, target) for target in cta_refs):
+                first_cta_idx = idx
+                break
+    except Exception:
+        first_cta_idx = len(setup_action_steps)
+
+    try:
+        for setup in setup_refs:
+            if not getattr(setup, "required", True):
+                continue
+            setup_label = (getattr(setup, "label", "") or "").strip()
+            if not setup_label:
+                continue
+            found_before_cta = False
+            for idx, step in enumerate(setup_action_steps):
+                if idx >= first_cta_idx:
+                    break
+                if _step_matches_ref(step, setup):
+                    found_before_cta = True
+                    break
+            if not found_before_cta:
+                errors.append(
+                    f"Required setup step missing before CTA: '{setup_label}'"
+                )
+            setup_idx = next(
+                (
+                    idx
+                    for idx, step in enumerate(setup_action_steps)
+                    if _step_matches_ref(step, setup)
+                ),
+                None,
+            )
+            for nav in leading_nav_refs(contract):
+                nav_label = (getattr(nav, "label", "") or "").strip()
+                nav_idx = next(
+                    (
+                        idx
+                        for idx, step in enumerate(setup_action_steps)
+                        if _step_matches_ref(step, nav)
+                    ),
+                    None,
+                )
+                if nav_idx is None:
+                    errors.append(
+                        f"Required navigation step missing before setup: '{nav_label}'"
+                    )
+                    continue
+                if setup_idx is not None and setup_idx < nav_idx:
+                    errors.append(
+                        f"Setup step '{setup_label}' must follow navigation '{nav_label}'"
+                    )
+    except Exception as e:
+        warnings.append(f"Could not validate contract setup steps: {e}")
 
 
 
@@ -156,32 +316,22 @@ def preflight_gate(
 
 
     if interaction_hints["high"] or interaction_hints["low"]:
-        earlier_clicks = click_steps[:-1] if len(click_steps) > 1 else []
-        earlier_labels = [
-            (s.get("label") or s.get("selector") or "").strip().lower()
-            for s in earlier_clicks
-        ]
-        zero_click_plan = len(click_steps) == 0
+        earlier_setup = setup_action_steps[:first_cta_idx]
+        earlier_labels = [_step_identity(s).lower() for s in earlier_setup]
+        chip_present = _plan_has_likely_chip(earlier_setup)
+        grounded_setup = bool(setup_refs)
         for hint in interaction_hints["high"]:
-            if any(
-                hint == label
-                or (len(hint) > 4 and hint in label)
-                or (len(label) > 4 and label in hint)
-                for label in earlier_labels
-            ):
+            if any(_label_matches(hint, label) for label in earlier_labels):
+                continue
+            if grounded_setup or chip_present:
+                warnings.append(
+                    f"Ungrounded contract hint '{hint}' is covered by a setup chip or setup_steps"
+                )
                 continue
             message = f"Missing prerequisite setup step implied by contract hint: '{hint}'"
-            if zero_click_plan:
-                warnings.append(message)
-            else:
-                errors.append(message)
+            warnings.append(message)
         for hint in interaction_hints["low"]:
-            if any(
-                hint == label
-                or (len(hint) > 4 and hint in label)
-                or (len(label) > 4 and label in hint)
-                for label in earlier_labels
-            ):
+            if any(_label_matches(hint, label) for label in earlier_labels):
                 continue
             warnings.append(
                 f"Weak prerequisite setup hint not covered explicitly: '{hint}'"

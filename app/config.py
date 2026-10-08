@@ -6,6 +6,7 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 VALID_TRIGGER_MODES = {"auto", "on-demand", "smart"}
+DEFAULT_COMMENT_COMMAND = "/glimpse"
 
 
 class ConfigValidationError(Exception):

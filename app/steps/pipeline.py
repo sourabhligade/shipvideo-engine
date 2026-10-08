@@ -8,9 +8,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.steps.pr_extraction import fetch_pr_diff
-from app.manifest import flow_to_generation_context, flow_to_steps, get_manifest_flow
-from app.render import render_video
+from app.manifest import (
+    flow_to_generation_context,
+    flow_to_steps,
+    select_manifest_flow,
+)
+from app.render import capture_dir_for_run, render_video, video_output_path_for_run
 from app.steps.step_execution import run_capture
+from app.steps.preflight import preflight_gate
 from app.steps.step_generation import generate_steps_from_diff
 from app.storage import upload_video
 from app.script_pipeline import ScriptPipelineError, run_script_pipeline
@@ -33,6 +38,7 @@ async def analyze_pr(
     *,
     diff_files: Optional[List[Dict[str, str]]] = None,
     start_route: Optional[str] = None,
+    intent_text: Optional[str] = None,
     force: bool = False,
     comment_triggered: bool = False,
 ) -> Dict[str, Any]:
@@ -88,21 +94,48 @@ async def analyze_pr(
                 "generation_context": None,
             }
 
-        manifest_flow = get_manifest_flow(
+        selection = select_manifest_flow(
             {
                 "pr_title": pr_title or "",
                 "diff_files": diff_files,
                 "start_route": start_route or contract.start_route or "",
+                "intent_text": intent_text or "",
             }
         )
+        if selection.skipped:
+            return {
+                "skipped": True,
+                "reason": selection.reason,
+                "steps": [{"action": "screenshot"}],
+                "narration": "Demo generation skipped for this pull request.",
+                "llm_cost_usd": 0.0,
+                "generation_context": None,
+                "manifest_candidates": list(selection.candidates),
+            }
+        manifest_flow = selection.flow
         if manifest_flow is not None:
             steps = flow_to_steps(manifest_flow)
+            generation_context = flow_to_generation_context(manifest_flow)
+            preflight = preflight_gate(steps, generation_context.get("contract"))
             print(
                 "[steps.pipeline/analyze_pr] manifest flow selected "
                 f"name={manifest_flow.name!r} reason={manifest_flow.selection_reason!r} "
-                f"steps={len(steps)}",
+                f"steps={len(steps)} preflight_passed={preflight.passed}",
                 flush=True,
             )
+            if not preflight.passed:
+                reason = "; ".join(preflight.errors) or "Manifest plan failed preflight."
+                return {
+                    "ok": False,
+                    "error": reason,
+                    "steps": [],
+                    "narration": "Demo generation failed for this pull request.",
+                    "budget_exceeded": False,
+                    "llm_cost_usd": 0.0,
+                    "generation_context": generation_context,
+                    "generation_hard_fail": True,
+                    "generation_soft_fallback": False,
+                }
             return {
                 "steps": steps,
                 "narration": (
@@ -112,7 +145,7 @@ async def analyze_pr(
                 "budget_exceeded": False,
                 "llm_cost_usd": 0.0,
                 "suggested_demo_flow": manifest_flow.suggested_demo_flow,
-                "generation_context": flow_to_generation_context(manifest_flow),
+                "generation_context": generation_context,
             }
 
         flow = await generate_steps_from_diff(
@@ -332,9 +365,10 @@ def run_pipeline(
 
     if screenshot_only_plan and not has_changed_testid_recovery:
         err = RuntimeError(
-            "Step generation did not produce a sendable proof-backed demo plan. "
-            "Pipeline aborted before capture."
+            "discovery_placeholder: Step generation did not produce a sendable "
+            "proof-backed demo plan. Pipeline aborted before capture."
         )
+        capture_summary["failure_reason"] = "discovery_placeholder"
         _finalize_run_metrics(success=False, error=err)
         raise err
     if screenshot_only_plan and has_changed_testid_recovery:
@@ -344,6 +378,8 @@ def run_pipeline(
             flush=True,
         )
 
+    capture_dir = capture_dir_for_run(run_metrics.run_id)
+
     if use_script_first and has_demo_flow:
         print("[steps.pipeline] trying script-first pipeline", flush=True)
         try:
@@ -351,7 +387,7 @@ def run_pipeline(
                 pr_number=pr_number,
                 preview_url=preview_url,
                 generation_context=generation_context,
-                screenshot_dir=SCREENSHOT_DIR,
+                screenshot_dir=capture_dir,
             )
             video_path = Path(result["video_path"])
             pipeline_used = "script"
@@ -409,7 +445,7 @@ def run_pipeline(
             capture_summary = run_capture(
                 preview_url=preview_url,
                 steps=steps,
-                screenshot_dir=SCREENSHOT_DIR,
+                screenshot_dir=capture_dir,
                 generation_context=generation_context,
             )
             if not capture_summary.get("success", False):
@@ -439,8 +475,16 @@ def run_pipeline(
                     "Stepwise capture produced no validated frames. "
                     "Pipeline aborted before rendering."
                 )
-            render_video(approved_frames, render_approval=render_approval)
-            video_path = SCREENSHOT_DIR / "out.mp4"
+            video_path = video_output_path_for_run(
+                run_metrics.run_id,
+                screenshot_dir=capture_dir,
+            )
+            render_video(
+                approved_frames,
+                render_approval=render_approval,
+                output_path=video_path,
+            )
+            run_metrics.extra["video_path"] = str(video_path)
             pipeline_used = "stepwise"
             capture_summary["pipeline"] = "stepwise"
             capture_summary["pipeline_branch"] = "stepwise"

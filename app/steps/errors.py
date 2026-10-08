@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Optional
+from typing import Any, List, Optional
 class ContractIntegrityError(Exception):
     def __init__(
         self,

@@ -26,7 +26,7 @@ class TestPhase6ConfigHygiene(unittest.TestCase):
         self.assertFalse(cs3.effective_full_page)
 
     def test_step_runner_uses_effective_full_page(self):
-        src = Path("app/execution/step_runner.py").read_text()
+        src = Path("app/execution/pw_stepwise.py").read_text()
         self.assertIn("effective_full_page", src)
 
     def test_no_dual_smart_prefilter(self):

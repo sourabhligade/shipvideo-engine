@@ -256,6 +256,51 @@ class AgentBrowserCLI:
         print(f"[agent_browser] wait url={expected!r}", flush=True)
         return self._run("wait", "--url", expected, timeout=timeout)
 
+    def wait_for_function(self, expression: str, *, timeout: int = 10) -> CommandResult:
+        expr = (expression or "").strip()
+        if not expr:
+            raise ValueError("expression cannot be empty")
+        print(f"[agent_browser] wait fn={expr!r}", flush=True)
+        return self._run("wait", "--fn", expr, timeout=timeout)
+
+    def get_box(self, ref_or_selector: str) -> Dict[str, float]:
+        target = (ref_or_selector or "").strip()
+        if not target:
+            return {}
+        try:
+            result = self._run("get", "box", target)
+        except AgentBrowserError:
+            return {}
+        data = result.get("data") or {}
+        raw = data.get("box") if isinstance(data.get("box"), dict) else data
+        if not isinstance(raw, dict):
+            return {}
+        box: Dict[str, float] = {}
+        for key in ("x", "y", "width", "height"):
+            try:
+                box[key] = float(raw.get(key))
+            except (TypeError, ValueError):
+                continue
+        return box
+
+    def diff_snapshot(self, *, compact: bool = True) -> Dict[str, Any]:
+        args: List[str] = ["diff", "snapshot"]
+        if compact:
+            args.append("-c")
+        print("[agent_browser] diff snapshot", flush=True)
+        result = self._run(*args)
+        data = result.get("data")
+        if isinstance(data, dict) and data:
+            return data
+        stdout = str(result.get("stdout") or "").strip()
+        return {"stdout": stdout} if stdout else {}
+
+    def annotated_screenshot(self, path: str | Path) -> CommandResult:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[agent_browser] screenshot --annotate path={target}", flush=True)
+        return self._run("screenshot", "--annotate", str(target), json_output=False)
+
     def scroll_into_view(self, ref_or_selector: str) -> CommandResult:
         target = (ref_or_selector or "").strip()
         if not target:
@@ -363,13 +408,16 @@ class AgentBrowserCLI:
     def find_testid(self, testid: str) -> str:
         return self.find_testid_ref(testid)
 
-    def find_role_ref(self, role: str, name: str) -> str:
+    def find_role_ref(self, role: str, name: str, *, exact: bool = False) -> str:
         role_norm = (role or "").strip().lower()
         target = (name or "").strip()
         if not role_norm or not target:
             return ""
         try:
-            res = self._run("find", "role", role_norm, "text", "--name", target)
+            args = ["find", "role", role_norm, "text", "--name", target]
+            if exact:
+                args.append("--exact")
+            res = self._run(*args)
             ref = self._extract_ref_from_find_output(res)
             if ref:
                 print(
@@ -415,6 +463,56 @@ class AgentBrowserCLI:
         except AgentBrowserError:
             pass
         return ""
+
+    def find_element(self, selector: str) -> str:
+        """Map a CSS selector or testid string onto existing find_* commands.
+
+        Agent Browser has no generic ``find_element`` CLI. Terminal checks pass
+        ``[data-testid='…']`` and ``#id``; resolve those via ``find testid`` /
+        ``find_ref``, and return the selector itself when ``get count`` sees it
+        (``is visible`` accepts a CSS selector).
+        """
+        target = (selector or "").strip()
+        if not target:
+            return ""
+        if re.fullmatch(r"@e\d+", target):
+            return target
+
+        testid_match = re.search(
+            r"\[data-testid=(['\"])([^'\"]+)\1\]",
+            target,
+            flags=re.IGNORECASE,
+        )
+        if testid_match:
+            ref = self.find_testid_ref(testid_match.group(2))
+            if ref:
+                print(
+                    f"[agent_browser] find_element selector={target!r} ref={ref!r}",
+                    flush=True,
+                )
+                return ref
+
+        if target.startswith("#") and len(target) > 1:
+            ident = target[1:].strip()
+            ref = self.find_testid_ref(ident) or self.find_ref(ident)
+            if ref:
+                print(
+                    f"[agent_browser] find_element selector={target!r} ref={ref!r}",
+                    flush=True,
+                )
+                return ref
+
+        try:
+            if self.get_count(target) > 0:
+                print(
+                    f"[agent_browser] find_element selector={target!r} via get_count",
+                    flush=True,
+                )
+                return target
+        except AgentBrowserError:
+            pass
+
+        return self.find_ref(target)
 
     def _extract_ref_from_find_output(self, result: CommandResult) -> str:
 
@@ -598,6 +696,15 @@ class AgentBrowserCLI:
                 or ""
             ).strip()
             href = str(meta.get("href") or "").strip()
+            pressed = meta.get("pressed")
+            if pressed is None:
+                pressed = meta.get("aria-pressed") or meta.get("ariaPressed")
+            checked = meta.get("checked")
+            if checked is None:
+                checked = meta.get("aria-checked") or meta.get("ariaChecked")
+            disabled = meta.get("disabled")
+            if disabled is None:
+                disabled = meta.get("aria-disabled") or meta.get("ariaDisabled")
             element = AgentBrowserElement(
                 ref=f"@{ref_id}",
                 role=role,
@@ -611,6 +718,15 @@ class AgentBrowserCLI:
                 surface=surface,
                 href=href,
             )
+            if pressed is not None:
+                element["pressed"] = pressed
+            if checked is not None:
+                element["checked"] = checked
+            if disabled is not None:
+                element["disabled"] = disabled
+            css = str(meta.get("class") or meta.get("className") or "").strip()
+            if css:
+                element["class"] = css
             if element["role"] in _INTERACTIVE_ROLES:
                 interactive_elements.append(element)
             else:

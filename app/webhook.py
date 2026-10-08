@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Header, Request
 import hmac, hashlib, json, os, asyncio
 from pathlib import Path
-from fastapi.responses import StreamingResponse
 from threading import Thread
 from app.github_comment import comment_on_pr
 from app.llm_guards import (
@@ -14,7 +13,7 @@ from app.llm_guards import (
 from app.steps.pipeline import analyze_pr, run_pipeline
 from app.steps.pr_extraction import fetch_pr_diff
 from app.preview_url_resolver import get_preview_url, wait_for_preview_ready
-from app.config import load_config
+from app.config import DEFAULT_COMMENT_COMMAND, load_config
 import time
 from observability import init_tracing, pipeline_run_span, print_pipeline_summary, set_current_span_error
 from contextlib import asynccontextmanager
@@ -22,8 +21,25 @@ from contextlib import asynccontextmanager
 from github import Github
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def run_summary_path() -> Path:
+    return REPO_ROOT / "data" / "pipeline_run_summary.json"
+
+
+def require_webhook_secret() -> str:
+    secret = _github_webhook_secret()
+    if not secret:
+        raise RuntimeError(
+            "GITHUB_WEBHOOK_SECRET is required. Set it before starting the webhook server."
+        )
+    return secret
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    require_webhook_secret()
     try:
         init_tracing()
     except Exception as e:
@@ -44,109 +60,72 @@ app.add_middleware(
 )
 
 
-GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "secret")
-
-
-BASE_DIR = Path(__file__).resolve().parent
-VIDEO_PATH = BASE_DIR / "screenshots" / "out.mp4"
-
-
-
-
-@app.get("/out.mp4")
-def get_video(request: Request):
-    if not VIDEO_PATH.exists():
-        return {"error": "Video not generated yet"}
-
-    file_size = VIDEO_PATH.stat().st_size
-    range_header = request.headers.get("range")
-    start = 0
-    end = file_size - 1
-
-    if range_header:
-        bytes_range = range_header.replace("bytes=", "").split("-")
-        if bytes_range[0]:
-            start = int(bytes_range[0])
-        if len(bytes_range) > 1 and bytes_range[1]:
-            end = int(bytes_range[1])
-    length = end - start + 1
-
-    def iterfile(path, start, length):
-        with open(path, "rb") as f:
-            f.seek(start)
-            remaining = length
-            while remaining > 0:
-                chunk_size = min(1024*1024, remaining)
-                data = f.read(chunk_size)
-                if not data:
-                    break
-                remaining -= len(data)
-                yield data
-
-    headers = {
-        "Content-Range": f"bytes {start}-{end}/{file_size}",
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(length),
-        "Content-Type": "video/mp4",
-    }
-    return StreamingResponse(iterfile(VIDEO_PATH, start, length), status_code=206, headers=headers)
-
-
-
-
-@app.get("/budget-status")
-def budget_status():
-    return get_budget_status()
-
-
-
+def _github_webhook_secret() -> str:
+    return (os.getenv("GITHUB_WEBHOOK_SECRET") or "").strip()
 
 
 def verify_signature(signature, payload):
-    mac = hmac.new(GITHUB_SECRET.encode(), payload, hashlib.sha256)
-    return hmac.compare_digest(f"sha256={mac.hexdigest()}", signature)
+    secret = _github_webhook_secret()
+    if not secret or not signature:
+        return False
+    mac = hmac.new(secret.encode(), payload, hashlib.sha256)
+    expected = f"sha256={mac.hexdigest()}"
+    try:
+        return hmac.compare_digest(expected, str(signature))
+    except Exception:
+        return False
+
+
+def _parse_glimpse_command(comment_body: str, command_prefix: str) -> dict | None:
+    body = (comment_body or "").strip()
+    if not body:
+        return None
+
+    tokens = body.split()
+    cmd_idx = None
+    for i, t in enumerate(tokens):
+        if t == command_prefix or t.startswith(command_prefix):
+            cmd_idx = i
+            break
+    if cmd_idx is None:
+        return None
+
+    force = False
+    route = None
+    remainder: list[str] = []
+
+    i = cmd_idx + 1
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--force":
+            force = True
+        elif t == "--route":
+            if i + 1 < len(tokens):
+                route = tokens[i + 1]
+                i += 1
+        elif t.startswith("--route="):
+            route = t.split("=", 1)[1]
+        elif t.startswith("--"):
+            pass
+        else:
+            remainder.append(t)
+        i += 1
+
+    if route is not None:
+        route = route.strip()
+        if route and not route.startswith("/"):
+            route = "/" + route
+        if route == "":
+            route = None
+
+    return {
+        "force": force,
+        "route": route,
+        "intent_text": " ".join(remainder).strip(),
+    }
 
 @app.post("/webhook")
 async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
-    def _parse_glimpse_command(comment_body: str, command_prefix: str) -> dict | None:
-        body = (comment_body or "").strip()
-        if not body:
-            return None
-
-        tokens = body.split()
-        cmd_idx = None
-        for i, t in enumerate(tokens):
-            if t == command_prefix or t.startswith(command_prefix):
-                cmd_idx = i
-                break
-        if cmd_idx is None:
-            return None
-
-        force = False
-        route = None
-
-        i = cmd_idx + 1
-        while i < len(tokens):
-            t = tokens[i]
-            if t == "--force":
-                force = True
-            elif t == "--route":
-                if i + 1 < len(tokens):
-                    route = tokens[i + 1]
-                    i += 1
-            elif t.startswith("--route="):
-                route = t.split("=", 1)[1]
-            i += 1
-
-        if route is not None:
-            route = route.strip()
-            if route and not route.startswith("/"):
-                route = "/" + route
-            if route == "":
-                route = None
-
-        return {"force": force, "route": route}
-
     def _count_patch_changed_lines(patch: str) -> int:
         plus_minus = 0
         for line in (patch or "").splitlines():
@@ -188,7 +167,8 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
 
     trigger_mode = (trigger_cfg.get("mode") or "auto").lower()
     threshold = int(trigger_cfg.get("threshold") or 5)
-    comment_command = trigger_cfg.get("commentCommand") or "/glimpse"
+    comment_command = trigger_cfg.get("commentCommand") or DEFAULT_COMMENT_COMMAND
+    # skipComment=true means post a skip comment (inverted English; do not rename).
     skip_comment = bool(trigger_cfg.get("skipComment", True))
     include_prefixes = trigger_cfg.get("include") or ["src/", "app/"]
     exclude_substrings = trigger_cfg.get("exclude") or [".test.", ".spec.", "/tests/", "/test/", "__tests__"]
@@ -199,6 +179,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     pr_branch: str | None = None
     commit_sha: str = ""
     start_route: str | None = None
+    intent_text: str = ""
     force: bool = False
     comment_triggered: bool = False
     diff_files: list[dict[str, str]] | None = None
@@ -259,6 +240,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
         force = bool(parsed.get("force", False))
         comment_triggered = True
         start_route = parsed.get("route")
+        intent_text = str(parsed.get("intent_text") or "").strip()
 
 
         token = os.getenv("GITHUB_TOKEN")
@@ -278,7 +260,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
             span.set_attribute("pr_number", pr_number)
             try:
                 print("\n[webhook] === PREVIEW RESOLUTION ===", flush=True)
-                if check_already_ran(repo_full_name, pr_number, commit_sha):
+                if not force and check_already_ran(repo_full_name, pr_number, commit_sha):
                     print("[llm-guards] skipping duplicate run", flush=True)
                     return
 
@@ -314,6 +296,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         staging_url=staging_url,
                         diff_files=diff_files,
                         start_route=start_route,
+                        intent_text=intent_text,
                         force=force,
                         comment_triggered=comment_triggered,
                     )
@@ -394,39 +377,44 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         generation_context=generation_context,
                     )
 
-                    summary_path = BASE_DIR / "data" / "pipeline_run_summary.json"
-                    summary_path.parent.mkdir(parents=True, exist_ok=True)
-                    _dbg = capture_summary.get("debug") or {}
-                    run_summary = {
-                        "pr_number": pr_number,
-                        "steps_generated": len(steps),
-                        "steps_succeeded": capture_summary["steps_succeeded"],
-                        "steps_failed": capture_summary["steps_failed"],
-                        "failure_reason": capture_summary.get("failure_reason"),
-                        "cost_usd": round(flow.get("llm_cost_usd", 0.0), 4),
-
-                        "video_pipeline": {
-                            "pipeline": capture_summary.get("pipeline"),
-                            "pipeline_branch": capture_summary.get("pipeline_branch"),
-                            "capture_browser": capture_summary.get("capture_browser"),
-                            "capture_path": capture_summary.get("capture_path"),
-                            "agent_browser_used": bool(
-                                capture_summary.get("agent_browser_used", False)
-                            ),
-                            "stepwise_engine": _dbg.get("engine"),
-                            "stepwise_mode": capture_summary.get("mode"),
-                        },
-                    }
-                    with open(summary_path, "w") as f:
-                        json.dump(run_summary, f, indent=2)
-                    print(f"[webhook] run summary file={summary_path.name}", flush=True)
-                    print(
-                        "[webhook] video capture: "
-                        f"branch={run_summary['video_pipeline']['pipeline_branch']!r} "
-                        f"browser={run_summary['video_pipeline']['capture_browser']!r} "
-                        f"agent_browser={run_summary['video_pipeline']['agent_browser_used']}",
-                        flush=True,
-                    )
+                    try:
+                        summary_path = run_summary_path()
+                        summary_path.parent.mkdir(parents=True, exist_ok=True)
+                        _dbg = capture_summary.get("debug") or {}
+                        run_summary = {
+                            "pr_number": pr_number,
+                            "steps_generated": len(steps),
+                            "steps_succeeded": capture_summary["steps_succeeded"],
+                            "steps_failed": capture_summary["steps_failed"],
+                            "failure_reason": capture_summary.get("failure_reason"),
+                            "cost_usd": round(flow.get("llm_cost_usd", 0.0), 4),
+                            "video_pipeline": {
+                                "pipeline": capture_summary.get("pipeline"),
+                                "pipeline_branch": capture_summary.get("pipeline_branch"),
+                                "capture_browser": capture_summary.get("capture_browser"),
+                                "capture_path": capture_summary.get("capture_path"),
+                                "agent_browser_used": bool(
+                                    capture_summary.get("agent_browser_used", False)
+                                ),
+                                "stepwise_engine": _dbg.get("engine"),
+                                "stepwise_mode": capture_summary.get("mode"),
+                            },
+                        }
+                        with open(summary_path, "w") as f:
+                            json.dump(run_summary, f, indent=2)
+                        print(f"[webhook] run summary file={summary_path.name}", flush=True)
+                        print(
+                            "[webhook] video capture: "
+                            f"branch={run_summary['video_pipeline']['pipeline_branch']!r} "
+                            f"browser={run_summary['video_pipeline']['capture_browser']!r} "
+                            f"agent_browser={run_summary['video_pipeline']['agent_browser_used']}",
+                            flush=True,
+                        )
+                    except Exception as summary_exc:
+                        print(
+                            f"[webhook] run summary skipped: {type(summary_exc).__name__}: {summary_exc}",
+                            flush=True,
+                        )
 
                     try:
                         run_budget_status = get_budget_status()

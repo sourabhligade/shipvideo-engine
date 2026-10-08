@@ -88,19 +88,21 @@ class StepValidationResult(TypedDict):
     failure_reason: str
 
 
-class ABPageSettleResult(TypedDict):
+class ABPageSettleResult(TypedDict, total=False):
     domcontentloaded: bool
     networkidle: bool
     validation_wait: str
     fallback_wait_used: bool
+    networkidle_skipped: bool
 
 
-class ABTargetResolution(TypedDict):
+class ABTargetResolution(TypedDict, total=False):
     chosen_ref: str
     selection_reason: str
     selection_source: str
     scroll_retry_used: bool
     should_retry: bool
+    candidate_count: int
 
 
 class ABActionabilityResult(TypedDict):

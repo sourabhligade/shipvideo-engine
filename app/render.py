@@ -1,3 +1,4 @@
+import re
 import subprocess
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -11,14 +12,45 @@ SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 FFMPEG_LOGLEVEL = "-loglevel", "error"
 
+_SAFE_RUN_ID = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe_run_token(run_id: str) -> str:
+    token = _SAFE_RUN_ID.sub("", str(run_id or "").strip()).strip("._-")
+    if not token:
+        raise ValueError("run_id is required for per-run capture output")
+    return token
+
+
+def capture_dir_for_run(
+    run_id: str,
+    *,
+    screenshot_dir: Optional[Path] = None,
+) -> Path:
+    """Per-run screenshot directory so concurrent captures cannot clobber shot*.png."""
+    dest = (screenshot_dir or SCREENSHOT_DIR) / _safe_run_token(run_id)
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def video_output_path_for_run(
+    run_id: str,
+    *,
+    screenshot_dir: Optional[Path] = None,
+) -> Path:
+    """Per-run mp4 path so concurrent pipelines cannot clobber one out.mp4."""
+    return (screenshot_dir or SCREENSHOT_DIR) / f"{_safe_run_token(run_id)}.mp4"
+
 
 @pipeline_step("render")
 def render_video(
     approved_frames: Optional[Iterable[str | Path]] = None,
     *,
     render_approval: Optional[dict] = None,
-):
-    output_path = SCREENSHOT_DIR / "out.mp4"
+    output_path: Optional[str | Path] = None,
+) -> Path:
+    dest = Path(output_path) if output_path else (SCREENSHOT_DIR / "out.mp4")
+    dest.parent.mkdir(parents=True, exist_ok=True)
 
     cs = load_capture_settings()
     W = cs.viewport_width
@@ -64,7 +96,7 @@ def render_video(
             "-level", "3.0",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
-            str(output_path),
+            str(dest),
         ]
     else:
 
@@ -88,9 +120,10 @@ def render_video(
             "-level", "3.0",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
-            str(output_path),
+            str(dest),
         ]
 
+    print(f"[render] output={dest}", flush=True)
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -100,6 +133,7 @@ def render_video(
     if result.returncode != 0 and result.stderr:
         print(f"[render] ffmpeg stderr: {result.stderr.strip()}", flush=True)
     result.check_returncode()
+    return dest
 
 if __name__ == "__main__":
     render_video()

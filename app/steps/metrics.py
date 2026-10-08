@@ -23,6 +23,7 @@ HARD_FAIL_REASON_MARKERS: Tuple[str, ...] = (
     "expected_proof_not_satisfied",
     "no_approved_frames",
     "target_route_not_reached",
+    "discovery_placeholder",
 )
 
 
