@@ -102,7 +102,7 @@ def infer_step_kind(step: Dict[str, Any]) -> str:
         return "confirm"
     if looks_like_cta_intent(label):
         return "cta"
-    return "cta"
+    return "unknown"
 
 
 def _first_amount_chip(snapshot: Dict[str, Any], *, used: set[str]) -> str:
@@ -273,6 +273,33 @@ def resolve_failed_confirm_proof(
     if cond_value not in drop_labels:
         drop_labels.append(cond_value)
     return BindResult(step=updated, drop_labels=drop_labels)
+
+
+def rising_confirm_rebound(
+    step: Dict[str, Any],
+    snap_before: Dict[str, Any],
+    snap_after: Dict[str, Any],
+    *,
+    remaining_steps: Optional[List[Dict[str, Any]]] = None,
+    evaluate: Any,
+) -> BindResult:
+    """Adopt a rebound confirm proof only when that proof rises after the click."""
+    rebound = resolve_failed_confirm_proof(
+        step,
+        snap_after,
+        remaining_steps=remaining_steps,
+    )
+    source = str(rebound.step.get("validation_source") or "")
+    if source not in {"snapshot_bound_terminal", "snapshot_bound_confirm"}:
+        return BindResult(step=dict(step))
+    validation = evaluate(
+        step=rebound.step,
+        snap_before=snap_before,
+        snap_after=snap_after,
+    )
+    if not validation.get("passed"):
+        return BindResult(step=dict(step))
+    return rebound
 
 
 def drop_labels_from_queue(

@@ -27,6 +27,7 @@ from app.execution.ab_settle import (
     settle_ab_page,
     wait_for_ab_element_present,
     wait_for_playwright_validation,
+    playwright_condition_holds,
 )
 from app.execution.ab_target import (
     resolve_ab_ref_with_commands,
@@ -110,6 +111,7 @@ _configure_ab_session = configure_ab_session
 _settle_ab_page = settle_ab_page
 _wait_for_ab_element_present = wait_for_ab_element_present
 _wait_for_playwright_validation = wait_for_playwright_validation
+_playwright_condition_holds = playwright_condition_holds
 _resolve_ab_ref_with_commands = resolve_ab_ref_with_commands
 _scroll_to_find = scroll_to_find
 _snapshot_element_by_ref = snapshot_element_by_ref

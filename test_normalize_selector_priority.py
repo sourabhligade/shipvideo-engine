@@ -97,6 +97,20 @@ class NormalizeSelectorPriorityTests(unittest.TestCase):
         self.assertEqual(out[0]["label"], "Save")
         self.assertEqual(out[0]["selector"], "button.primary")
 
+    def test_passthrough_click_kind(self):
+        out = normalize_steps(
+            [
+                {
+                    "action": "click",
+                    "label": "Settings",
+                    "kind": "nav",
+                    "planned_label": "Settings",
+                }
+            ]
+        )
+        self.assertEqual(out[0]["kind"], "nav")
+        self.assertEqual(out[0]["planned_label"], "Settings")
+
     def test_passthrough_validation_fields(self):
         out = normalize_steps(
             [

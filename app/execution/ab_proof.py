@@ -160,10 +160,17 @@ def _class_selected(element: Dict[str, Any]) -> bool:
 
 
 def _is_disabled(element: Dict[str, Any]) -> bool:
+    if "disabled" not in element:
+        return str(element.get("aria-disabled") or "").strip().lower() in {"true", "disabled"}
     value = element.get("disabled")
     if value is True:
         return True
-    return str(value or "").strip().lower() in {"true", "disabled"}
+    if value is False:
+        return False
+    text = str(value).strip().lower()
+    if text in {"true", "disabled"}:
+        return True
+    return text == ""
 
 
 def _amount_selection_rose(
@@ -209,11 +216,9 @@ def stamp_amount_control_state(
     if not looks_like_amount_chip(label):
         return
     get_attr = getattr(cli, "get_attr", None)
-    if not callable(get_attr):
-        return
     chip = _named_element(snapshot, label)
     ref = (chip_ref or "").strip() or str((chip or {}).get("ref") or "").strip()
-    if chip is not None and ref:
+    if chip is not None and ref and callable(get_attr):
         css = str(get_attr(ref, "class") or "")
         if css:
             chip["class"] = css
@@ -227,8 +232,18 @@ def stamp_amount_control_state(
     proof_ref = str((proof or {}).get("ref") or "").strip()
     if proof is None or not proof_ref:
         return
-    disabled = str(get_attr(proof_ref, "disabled") or "").strip().lower()
+    is_enabled = getattr(cli, "is_enabled", None)
+    if callable(is_enabled):
+        try:
+            proof["disabled"] = not bool(is_enabled(proof_ref))
+        except Exception:
+            pass
+        return
+    if not callable(get_attr):
+        return
+    disabled_raw = get_attr(proof_ref, "disabled")
     aria_disabled = str(get_attr(proof_ref, "aria-disabled") or "").strip().lower()
+    disabled = str(disabled_raw or "").strip().lower()
     if disabled in {"true", "disabled"} or aria_disabled == "true":
         proof["disabled"] = True
     elif aria_disabled == "false":
@@ -282,13 +297,25 @@ def validation_from_successful_text_wait(
     *,
     step: Dict[str, Any],
     step_result: Dict[str, Any],
+    snap_before: Optional[Dict[str, Any]] = None,
 ) -> Optional[StepValidationResult]:
     condition = extract_validation_condition(step)
     if condition is None or condition["type"] != "text_present":
         return None
+    if not isinstance(snap_before, dict):
+        return None
 
     post_click_settle = step_result.get("post_click_settle") or {}
     if str(post_click_settle.get("validation_wait") or "") != "text_present":
+        return None
+
+    before_matches = matches_validation_condition(
+        condition,
+        current_url=str(snap_before.get("current_url") or ""),
+        snapshot_text=str(snap_before.get("snapshot_text") or ""),
+        element_names=element_names(snap_before),
+    )
+    if before_matches:
         return None
 
     return StepValidationResult(

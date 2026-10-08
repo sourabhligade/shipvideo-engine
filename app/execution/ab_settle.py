@@ -115,6 +115,32 @@ def wait_for_playwright_validation(page: Any, condition: Optional[ValidationCond
         )
 
 
+def playwright_condition_holds(page: Any, condition: Optional[ValidationCondition]) -> bool:
+    if condition is None:
+        return False
+    cond_type = str(condition.get("type") or "").strip()
+    cond_value = str(condition.get("value") or "").strip()
+    if not cond_type or not cond_value:
+        return False
+    try:
+        if cond_type == "url_match":
+            return cond_value.lower() in str(getattr(page, "url", "") or "").lower()
+        if cond_type == "text_present":
+            return bool(page.get_by_text(cond_value, exact=False).first.is_visible())
+        if cond_type == "element_present":
+            for selector in (f"[data-testid='{cond_value}']", f"#{cond_value}"):
+                locator = page.locator(selector)
+                try:
+                    if locator.count() > 0 and locator.first.is_visible():
+                        return True
+                except Exception:
+                    continue
+            return bool(page.get_by_text(cond_value, exact=False).first.is_visible())
+    except Exception:
+        return False
+    return False
+
+
 def settle_ab_page(
     cli: Any,
     *,

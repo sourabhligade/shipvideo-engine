@@ -52,7 +52,6 @@ def _run_ab_click_attempt(
     _detect_state_change = sr._detect_state_change
     _evaluate_click_validation = sr._evaluate_click_validation
     _validation_from_successful_text_wait = sr._validation_from_successful_text_wait
-    resolve_failed_confirm_proof = sr.resolve_failed_confirm_proof
     attempt_screenshots: List[Path] = []
     result: Dict[str, Any] = {
         "attempt_screenshots": attempt_screenshots,
@@ -299,25 +298,30 @@ def _run_ab_click_attempt(
         waited_validation = _validation_from_successful_text_wait(
             step=step,
             step_result=step_result,
+            snap_before=snap,
         )
         if waited_validation is not None:
             validation = waited_validation
     if not validation["passed"]:
-        rebound = resolve_failed_confirm_proof(
+        from app.execution.ab_bind import rising_confirm_rebound
+
+        rebound = rising_confirm_rebound(
             step,
+            snap,
             snap_after,
             remaining_steps=remaining_steps or [],
+            evaluate=_evaluate_click_validation,
         )
-        if rebound.drop_labels:
-            result["drop_labels"] = list(rebound.drop_labels)
-        if rebound.step.get("validation_source") in {
+        if str(rebound.step.get("validation_source") or "") in {
             "snapshot_bound_terminal",
             "snapshot_bound_confirm",
         }:
             step = rebound.step
             result["bound_step"] = step
             step_result["step"] = step
-            step_result["bind_reason"] = "confirm_proof_rebound_to_terminal"
+            step_result["bind_reason"] = "confirm_proof_rebound"
+            if rebound.drop_labels:
+                result["drop_labels"] = list(rebound.drop_labels)
             validation = _evaluate_click_validation(
                 step=step,
                 snap_before=snap,

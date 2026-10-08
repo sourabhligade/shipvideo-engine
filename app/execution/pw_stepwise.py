@@ -22,6 +22,7 @@ def _execute_one(
     _resolve_url = sr._resolve_url
     _extract_validation_condition = sr._extract_validation_condition
     _wait_for_playwright_validation = sr._wait_for_playwright_validation
+    _playwright_condition_holds = sr._playwright_condition_holds
     _assert_playwright_terminal_condition = sr._assert_playwright_terminal_condition
     action = step.get("action")
     if action == "goto":
@@ -56,10 +57,17 @@ def _execute_one(
             return False, shot_idx, "missing_click_target"
         if validation_condition is None:
             return False, shot_idx, "missing_validation_condition"
+        before_held = _playwright_condition_holds(page, validation_condition)
         loc.first.click(timeout=8000)
         try:
             _wait_for_playwright_validation(page, validation_condition)
         except Exception:
+            return (
+                False,
+                shot_idx,
+                f"validation_failed:{validation_condition['type']}:{validation_condition['value']}",
+            )
+        if before_held or not _playwright_condition_holds(page, validation_condition):
             return (
                 False,
                 shot_idx,

@@ -554,8 +554,10 @@ def run_ab_stepwise(
                                 "validation_actual": inferred_validation["actual"],
                             })
 
+                    validation_already_passed = bool(validation and validation.get("passed"))
                     if (
                         not state_changed
+                        and not validation_already_passed
                         and _replans_used < MAX_AB_REPLANS_PER_RUN
                         and (
                             validation_condition is not None
@@ -646,7 +648,8 @@ def run_ab_stepwise(
                         break
 
                     if validation and validation["passed"]:
-                        outcome = str(attempt_result["outcome"])
+                        attempt_outcome = str(attempt_result["outcome"] or "")
+                        outcome = "success" if attempt_outcome == "unvalidated" else attempt_outcome
                         last_action_key = action_key
                         _log("ab_runner.validation_passed", {
                             "index": step_idx, "attempt": attempt,
@@ -691,6 +694,12 @@ def run_ab_stepwise(
                     if outcome == "wrong_click" and _flow_restarts_used < MAX_AB_FLOW_RESTARTS:
                         replay_steps = _validated_milestone_steps(results)
                         if replay_steps:
+                            from app.execution.ab_recovery import (
+                                milestone_screenshot_slots,
+                                restore_restart_frames,
+                            )
+
+                            frame_slots = milestone_screenshot_slots(results)
                             _flow_restarts_used += 1
                             _log("ab_runner.flow_restart", {
                                 "index": step_idx,
@@ -717,13 +726,20 @@ def run_ab_stepwise(
                                     steps=replay_steps,
                                     mode=mode,
                                     capture_settings=cs,
+                                    screenshot_dir=screenshot_dir,
                                 )
                             except AgentBrowserError as exc:
                                 replay = {
                                     "success": False,
                                     "error": f"restart_failed:{exc}",
                                 }
-                            if replay.get("success"):
+                            frames_restored = bool(replay.get("success")) and restore_restart_frames(
+                                results,
+                                frame_slots,
+                                list(replay.get("frames") or []),
+                            )
+                            if frames_restored:
+                                shot_idx = int(replay.get("shot_idx") or 1)
                                 last_action_key = None
                                 step_result["restart_recovery"] = {
                                     "triggered": True,
@@ -735,7 +751,11 @@ def run_ab_stepwise(
                                 "triggered": True,
                                 "restart_number": _flow_restarts_used,
                                 "replayed_steps": len(replay_steps),
-                                "error": replay.get("error", "replay_failed"),
+                                "error": (
+                                    replay.get("error")
+                                    if not replay.get("success")
+                                    else "restart_frames_missing"
+                                ),
                             }
                     step_result["status"] = "failed"
                     if not _should_keep_click_screenshots(step_result):

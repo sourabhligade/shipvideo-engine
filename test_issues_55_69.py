@@ -180,6 +180,16 @@ class Issue60PlaywrightProofTests(unittest.TestCase):
         loc.count.return_value = 1
         loc.first = loc
         page.locator.return_value = loc
+        visible = {"now": False}
+        text = MagicMock()
+        text.first = text
+        text.is_visible.side_effect = lambda: visible["now"]
+        page.get_by_text.return_value = text
+
+        def _click(*_args, **_kwargs):
+            visible["now"] = True
+
+        loc.click.side_effect = _click
         ok, _, err = _execute_one(
             page,
             "https://ex.com",
@@ -194,6 +204,30 @@ class Issue60PlaywrightProofTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIsNone(err)
         loc.first.click.assert_called_once()
+
+    def test_sticky_text_is_not_a_rising_edge(self):
+        page = MagicMock()
+        loc = MagicMock()
+        loc.count.return_value = 1
+        loc.first = loc
+        page.locator.return_value = loc
+        text = MagicMock()
+        text.first = text
+        text.is_visible.return_value = True
+        page.get_by_text.return_value = text
+        ok, _, err = _execute_one(
+            page,
+            "https://ex.com",
+            {
+                "action": "click",
+                "selector": "[data-testid='save']",
+                "validation_condition": {"type": "text_present", "value": "Saved"},
+            },
+            Path("/tmp"),
+            1,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(err, "validation_failed:text_present:Saved")
 
 
 class Issue61ForceRetryTests(unittest.TestCase):

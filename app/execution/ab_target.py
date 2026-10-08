@@ -29,7 +29,7 @@ def resolve_ab_ref_with_commands(
         return ""
 
     for role in ("button", "link"):
-        found_ref = cli.find_role_ref(role, intent)
+        found_ref = cli.find_role_ref(role, intent, exact=True)
         if found_ref:
             return found_ref
 
@@ -37,7 +37,7 @@ def resolve_ab_ref_with_commands(
     if found_ref:
         return found_ref
 
-    return cli.find_ref(intent)
+    return ""
 
 
 def scroll_to_find(
@@ -189,18 +189,13 @@ def resolve_ab_click_target(
             })
             return resolved
 
-    if intent:
-        for role in ("button", "link"):
-            found_ref = cli.find_role_ref(role, intent)
-            if found_ref:
-                resolved.update({
-                    "chosen_ref": found_ref,
-                    "selection_reason": f"ab_find_role_{role}",
-                    "selection_source": "semantic_role",
-                    "candidate_count": 1,
-                })
-                return resolved
-
+    exact_reasons = {
+        "testid_match",
+        "aria_match",
+        "id_match",
+        "exact_match",
+        "case_insensitive_match",
+    }
     sel = select_ref(
         intent,
         snapshot,
@@ -209,28 +204,36 @@ def resolve_ab_click_target(
         preferred_surface=preferred_surface,
         preferred_texts=preferred_texts,
     )
-    resolved.update({
-        "chosen_ref": sel["chosen_ref"],
-        "selection_reason": sel["selection_reason"],
-        "selection_source": "deterministic",
-        "candidate_count": len(sel.get("candidates") or []),
-    })
-    if sel["chosen_ref"]:
-        return resolved
-
-    if str(sel.get("selection_reason") or "") == "ambiguous":
-        resolved["selection_source"] = "ambiguous"
-        return resolved
-
-    found_ref = cli.find_label_ref(intent)
-    if found_ref:
+    reason = str(sel.get("selection_reason") or "")
+    candidate_count = len(sel.get("candidates") or [])
+    if reason == "ambiguous":
         resolved.update({
-            "chosen_ref": found_ref,
-            "selection_reason": "ab_find_label",
-            "selection_source": "semantic_label",
-            "candidate_count": max(int(resolved.get("candidate_count") or 0), 1),
+            "chosen_ref": "",
+            "selection_reason": "ambiguous",
+            "selection_source": "ambiguous",
+            "candidate_count": candidate_count,
         })
         return resolved
+    if sel.get("chosen_ref") and reason in exact_reasons:
+        resolved.update({
+            "chosen_ref": sel["chosen_ref"],
+            "selection_reason": reason,
+            "selection_source": "deterministic",
+            "candidate_count": candidate_count,
+        })
+        return resolved
+
+    if intent:
+        for role in ("button", "link"):
+            found_ref = cli.find_role_ref(role, intent, exact=True)
+            if found_ref:
+                resolved.update({
+                    "chosen_ref": found_ref,
+                    "selection_reason": f"ab_find_role_{role}",
+                    "selection_source": "semantic_role",
+                    "candidate_count": max(candidate_count, 1),
+                })
+                return resolved
 
     geo_ref, geo_count = unique_visible_role_ref(cli, snapshot=snapshot, intent=intent)
     if geo_count:
@@ -240,16 +243,6 @@ def resolve_ab_click_target(
             "chosen_ref": geo_ref,
             "selection_reason": "geometry_box",
             "selection_source": "geometry",
-        })
-        return resolved
-
-    found_ref = cli.find_ref(intent)
-    if found_ref:
-        resolved.update({
-            "chosen_ref": found_ref,
-            "selection_reason": "ab_find",
-            "selection_source": "semantic_find",
-            "candidate_count": max(int(resolved.get("candidate_count") or 0), 1),
         })
         return resolved
 

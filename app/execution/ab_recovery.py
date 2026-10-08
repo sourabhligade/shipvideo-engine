@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -157,6 +158,10 @@ def recover_ab_prerequisite_steps(
         for step in steps[:step_index]
         if str(step.get("action") or "") in {"click", "select", "check"}
     }
+    if trigger_reason == "state_unchanged":
+        current_label = str(current_step.get("label") or current_intent or "").strip()
+        if current_label:
+            existing_labels.add(current_label)
 
     if looks_like_cta_intent(blocked_intent):
         if looks_like_confirm_intent(blocked_intent) and any(
@@ -250,6 +255,56 @@ def validated_milestone_steps(results: List[Dict[str, Any]]) -> List[Dict[str, A
     return milestones
 
 
+def milestone_screenshot_slots(results: List[Dict[str, Any]]) -> List[Optional[int]]:
+    """Screenshot result that follows each successful goto or click, in order."""
+    milestone_indexes: List[int] = []
+    for index, result in enumerate(results):
+        if str(result.get("status") or "") != "ok":
+            continue
+        if str(result.get("outcome") or "") != "success":
+            continue
+        action = str((result.get("step") or {}).get("action") or "")
+        if action in {"goto", "click"}:
+            milestone_indexes.append(index)
+    slots: List[Optional[int]] = []
+    for position, index in enumerate(milestone_indexes):
+        end = (
+            milestone_indexes[position + 1]
+            if position + 1 < len(milestone_indexes)
+            else len(results)
+        )
+        slot: Optional[int] = None
+        for cursor in range(index + 1, end):
+            action = str((results[cursor].get("step") or {}).get("action") or "")
+            if action == "screenshot" and str(results[cursor].get("status") or "") == "ok":
+                slot = cursor
+                break
+        slots.append(slot)
+    return slots
+
+
+def restore_restart_frames(
+    results: List[Dict[str, Any]],
+    slots: List[Optional[int]],
+    frames: List[str],
+) -> bool:
+    if len(frames) != len(slots):
+        return False
+    restored: List[tuple[int, str]] = []
+    for slot, frame in zip(slots, frames):
+        if slot is None:
+            continue
+        path = Path(str(frame or ""))
+        if not frame or not path.exists():
+            return False
+        restored.append((slot, str(path)))
+    for slot, frame in restored:
+        results[slot]["screenshot_path"] = frame
+        results[slot]["status"] = "ok"
+        results[slot]["outcome"] = "success"
+    return True
+
+
 def replay_ab_milestones(
     *,
     cli: Any,
@@ -257,9 +312,28 @@ def replay_ab_milestones(
     steps: List[Dict[str, Any]],
     mode: str,
     capture_settings: CaptureSettings,
+    screenshot_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     from app.browser.ref_selector import derive_intent
     from app.context.dom_extractor import extract_ab_context
+
+    frames: List[str] = []
+    shot_idx = 1
+
+    def _capture_frame() -> bool:
+        nonlocal shot_idx
+        if screenshot_dir is None:
+            frames.append("")
+            return True
+        path = Path(screenshot_dir) / f"shot{shot_idx}.png"
+        try:
+            cli.screenshot(path)
+        except Exception:
+            frames.append("")
+            return False
+        frames.append(str(path))
+        shot_idx += 1
+        return True
 
     cli.open(preview_url)
     configure_ab_session(cli, capture_settings)
@@ -271,6 +345,13 @@ def replay_ab_milestones(
             url = step.get("url") or "/"
             cli.open(resolve_url(preview_url, url))
             settle_ab_page(cli, require_networkidle=False)
+            if not _capture_frame():
+                return {
+                    "success": False,
+                    "error": "restart_frame_missing",
+                    "index": idx,
+                    "frames": frames,
+                }
             continue
         if action != "click":
             continue
@@ -326,4 +407,12 @@ def replay_ab_milestones(
                 "index": idx,
                 "intent": intent,
             }
-    return {"success": True}
+        if not _capture_frame():
+            return {
+                "success": False,
+                "error": "restart_frame_missing",
+                "index": idx,
+                "intent": intent,
+                "frames": frames,
+            }
+    return {"success": True, "frames": frames, "shot_idx": shot_idx}

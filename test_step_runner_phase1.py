@@ -116,8 +116,8 @@ class _FakeCLI:
         self.calls.append(("find_label_ref", label))
         return self.found_label_ref
 
-    def find_role_ref(self, role, name):
-        self.calls.append(("find_role_ref", role, name))
+    def find_role_ref(self, role, name, exact=False):
+        self.calls.append(("find_role_ref", role, name, bool(exact)))
         if role == "button":
             return self.found_role_button_ref
         if role == "link":
@@ -250,7 +250,7 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         self.assertEqual(result["selection_source"], "semantic_testid")
         self.assertEqual(result["candidate_count"], 1)
 
-    def test_resolve_ab_click_target_prefers_role_lookup_before_snapshot_matching(self):
+    def test_resolve_ab_click_target_prefers_exact_snapshot_before_role_lookup(self):
         cli = _FakeCLI(found_role_button_ref="@e55")
         snapshot = {
             "interactive_elements": [
@@ -269,18 +269,18 @@ class StepRunnerPhase1Tests(unittest.TestCase):
             allow_scroll_retry=True,
         )
 
-        self.assertEqual(
-            cli.calls,
-            [("find_role_ref", "button", "Proceed Recharge")],
-        )
-        self.assertEqual(result["chosen_ref"], "@e55")
-        self.assertEqual(result["selection_source"], "semantic_role")
+        self.assertEqual(cli.calls, [])
+        self.assertEqual(result["chosen_ref"], "@e2")
+        self.assertEqual(result["selection_reason"], "exact_match")
+        self.assertEqual(result["selection_source"], "deterministic")
         self.assertEqual(result["candidate_count"], 1)
 
-    def test_resolve_ab_click_target_uses_semantic_find_after_command_lookups_miss(self):
+    def test_resolve_ab_click_target_rejects_substring_find(self):
         cli = _FakeCLI(found_ref="@e99")
         snapshot = {
-            "interactive_elements": [],
+            "interactive_elements": [
+                {"ref": "@e3", "role": "button", "name": "Next page"},
+            ],
             "context_elements": [],
             "current_url": "https://example.test",
             "snapshot_text": "",
@@ -288,26 +288,46 @@ class StepRunnerPhase1Tests(unittest.TestCase):
 
         result = _resolve_ab_click_target(
             cli,
-            intent="Proceed Recharge",
+            intent="Next",
             snapshot=snapshot,
             mode="deterministic",
             allow_scroll_retry=True,
         )
 
-        self.assertEqual(result["chosen_ref"], "@e99")
-        self.assertEqual(result["selection_reason"], "ab_find")
-        self.assertEqual(result["selection_source"], "semantic_find")
-        self.assertEqual(result["candidate_count"], 1)
-        self.assertFalse(result["should_retry"])
+        self.assertEqual(result["chosen_ref"], "")
+        self.assertNotEqual(result["selection_source"], "semantic_find")
+        self.assertTrue(result["should_retry"])
         self.assertEqual(
             cli.calls,
             [
-                ("find_role_ref", "button", "Proceed Recharge"),
-                ("find_role_ref", "link", "Proceed Recharge"),
-                ("find_label_ref", "Proceed Recharge"),
-                ("find_ref", "Proceed Recharge"),
+                ("find_role_ref", "button", "Next", True),
+                ("find_role_ref", "link", "Next", True),
             ],
         )
+
+    def test_resolve_ab_click_target_fails_closed_when_snapshot_name_is_ambiguous(self):
+        cli = _FakeCLI(found_role_button_ref="@e55")
+        snapshot = {
+            "interactive_elements": [
+                {"ref": "@e1", "role": "button", "name": "Pay"},
+                {"ref": "@e2", "role": "button", "name": "Pay"},
+            ],
+            "context_elements": [],
+            "current_url": "https://example.test",
+            "snapshot_text": "",
+        }
+
+        result = _resolve_ab_click_target(
+            cli,
+            intent="Pay",
+            snapshot=snapshot,
+            mode="deterministic",
+            allow_scroll_retry=True,
+        )
+
+        self.assertEqual(result["chosen_ref"], "")
+        self.assertEqual(result["selection_reason"], "ambiguous")
+        self.assertEqual(cli.calls, [])
 
     def test_resolve_ab_click_target_requests_scroll_retry_after_find_miss(self):
         cli = _FakeCLI(found_ref="")
@@ -919,12 +939,14 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         cli = _FakeCLI()
         call_count = {"find_ref": 0}
 
-        def fake_find_ref(intent):
-            cli.calls.append(("find_ref", intent))
+        def fake_find_role(role, name, exact=False):
+            cli.calls.append(("find_role_ref", role, name, bool(exact)))
+            if role != "button":
+                return ""
             call_count["find_ref"] += 1
             return "@e42" if call_count["find_ref"] == 3 else ""
 
-        cli.find_ref = fake_find_ref
+        cli.find_role_ref = fake_find_role
 
         result = _scroll_to_find(cli, intent="Proceed Recharge")
 
@@ -932,22 +954,17 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         self.assertEqual(
             cli.calls,
             [
-                ("find_role_ref", "button", "Proceed Recharge"),
-                ("find_role_ref", "link", "Proceed Recharge"),
+                ("find_role_ref", "button", "Proceed Recharge", True),
+                ("find_role_ref", "link", "Proceed Recharge", True),
                 ("find_label_ref", "Proceed Recharge"),
-                ("find_ref", "Proceed Recharge"),
                 ("scroll", "down", 400),
                 ("wait_for_load_state", "networkidle", 1),
-                ("find_role_ref", "button", "Proceed Recharge"),
-                ("find_role_ref", "link", "Proceed Recharge"),
+                ("find_role_ref", "button", "Proceed Recharge", True),
+                ("find_role_ref", "link", "Proceed Recharge", True),
                 ("find_label_ref", "Proceed Recharge"),
-                ("find_ref", "Proceed Recharge"),
                 ("scroll", "down", 400),
                 ("wait_for_load_state", "networkidle", 1),
-                ("find_role_ref", "button", "Proceed Recharge"),
-                ("find_role_ref", "link", "Proceed Recharge"),
-                ("find_label_ref", "Proceed Recharge"),
-                ("find_ref", "Proceed Recharge"),
+                ("find_role_ref", "button", "Proceed Recharge", True),
                 ("scroll_into_view", "@e42"),
             ],
         )

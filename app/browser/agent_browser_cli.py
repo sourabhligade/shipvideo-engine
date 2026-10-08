@@ -408,13 +408,16 @@ class AgentBrowserCLI:
     def find_testid(self, testid: str) -> str:
         return self.find_testid_ref(testid)
 
-    def find_role_ref(self, role: str, name: str) -> str:
+    def find_role_ref(self, role: str, name: str, *, exact: bool = False) -> str:
         role_norm = (role or "").strip().lower()
         target = (name or "").strip()
         if not role_norm or not target:
             return ""
         try:
-            res = self._run("find", "role", role_norm, "text", "--name", target)
+            args = ["find", "role", role_norm, "text", "--name", target]
+            if exact:
+                args.append("--exact")
+            res = self._run(*args)
             ref = self._extract_ref_from_find_output(res)
             if ref:
                 print(

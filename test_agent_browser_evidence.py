@@ -114,13 +114,13 @@ class GeometryFallbackTests(unittest.TestCase):
         self.assertEqual(ref, "")
         self.assertEqual(count, 2)
 
-    def test_resolve_uses_geometry_before_find_ref(self):
+    def test_resolve_rejects_substring_find_ref(self):
         class _Cli:
             def find_testid_ref(self, testid):
                 return ""
 
-            def find_role_ref(self, role, name):
-                return ""
+            def find_role_ref(self, role, name, exact=False):
+                return "" if exact else "@substring"
 
             def find_label_ref(self, intent):
                 return ""
@@ -145,9 +145,8 @@ class GeometryFallbackTests(unittest.TestCase):
             mode="deterministic",
             allow_scroll_retry=False,
         )
-        self.assertEqual(result["chosen_ref"], "@list-order")
-        self.assertEqual(result["selection_reason"], "ab_find")
-        self.assertEqual(result["selection_source"], "semantic_find")
+        self.assertEqual(result["chosen_ref"], "")
+        self.assertEqual(result["selection_reason"], "no_match")
 
 
 class ZeroBoxActionabilityTests(unittest.TestCase):

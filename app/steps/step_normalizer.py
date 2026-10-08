@@ -14,6 +14,9 @@ _PASSTHROUGH_FIELDS = (
     "expected_url",
     "expected_testid",
     "terminal",
+    "kind",
+    "planned_label",
+    "bound_from",
 )
 
 
